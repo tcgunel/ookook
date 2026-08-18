@@ -75,6 +75,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// callback does not misreport a deliberate stop as a crash.
     private var stopRequested = false
     private var restartWork: DispatchWorkItem?
+    private var appearanceObserver: NSObjectProtocol?
 
     private static let maxRestartDelay: TimeInterval = 30
 
@@ -86,12 +87,42 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         terminalView.processDelegate = self
-        terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        TerminalAppearance.apply(to: terminalView)
+        appearanceObserver = NotificationCenter.default.addObserver(
+            forName: TerminalAppearance.changed, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    TerminalAppearance.apply(to: self.terminalView)
+                }
+            }
         terminalView.onActivity = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.activity = self.terminalView.log.lastActivity
             }
+        }
+        restoreScrollback()
+    }
+
+    /// Replays the previous session's output into the fresh terminal, so a tile
+    /// is not blank until you start the process again. Marked off with a rule
+    /// so old output is never mistaken for something happening now.
+    private func restoreScrollback() {
+        let lines = ScrollbackStore.load(for: ref)
+        guard !lines.isEmpty else { return }
+        let body = lines.joined(separator: "\r\n")
+        // Dim, so restored history reads as history at a glance.
+        terminalView.feed(text: "\u{1B}[2m\(body)\r\n── previous session ──\u{1B}[0m\r\n")
+    }
+
+    /// Called before the app quits, and whenever a process stops.
+    func persistScrollback() {
+        ScrollbackStore.save(log.tail(ScrollbackStore.maxLines), for: ref)
+    }
+
+    deinit {
+        if let appearanceObserver {
+            NotificationCenter.default.removeObserver(appearanceObserver)
         }
     }
 

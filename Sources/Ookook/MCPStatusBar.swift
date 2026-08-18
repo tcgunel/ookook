@@ -21,6 +21,13 @@ struct MCPStatusBar: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                if resources.totalCPU >= 1 {
+                    Text(resources.totalCPU.formattedCPU)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .help("Total CPU used by all running processes, as a percentage of one core")
+                }
                 if resources.totalMemory > 0 {
                     Text(resources.totalMemory.formattedBytes)
                         .font(.caption)

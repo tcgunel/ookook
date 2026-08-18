@@ -205,6 +205,12 @@ final class AppModel: ObservableObject {
         git.start()
     }
 
+    /// Called on quit: what each terminal was showing is worth more than the
+    /// few milliseconds it costs to write it out.
+    func persistScrollback() {
+        projects.flatMap(\.controllers).forEach { $0.persistScrollback() }
+    }
+
     func stopServices() {
         git.stop()
         agents.stop()

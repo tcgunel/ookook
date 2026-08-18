@@ -271,6 +271,7 @@ private struct SidebarGroupView: View {
                            label: layout.displayName(projectID: project.id,
                                                      process: controller.spec.name),
                            memory: resources.memoryByProcess[controller.ref.id],
+                           cpu: resources.cpuByProcess[controller.ref.id],
                            session: agents.sessions[controller.ref.id],
                            onRename: {
                                onRename(.process(project: project.id,
@@ -377,6 +378,7 @@ private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
     let label: String
     let memory: UInt64?
+    let cpu: Double?
     let session: AgentSession?
     let onRename: () -> Void
     /// Present only when the row is showing a user-given name.
@@ -421,6 +423,15 @@ private struct ProcessRow: View {
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
+                    }
+                    // Only worth the width when it is actually doing something;
+                    // a column of "0%" on idle agents is noise.
+                    if let cpu, cpu >= 1 {
+                        Text(cpu.formattedCPU)
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(cpu >= 90 ? .orange : .secondary)
+                            .help("CPU, as a percentage of one core")
                     }
                     if let memory, memory > 0 {
                         Text(memory.formattedBytes)

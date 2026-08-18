@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Never leave supervised children orphaned when the app goes away.
     func applicationWillTerminate(_ notification: Notification) {
+        app.persistScrollback()
         app.stopServices()
         app.stopAll()
     }

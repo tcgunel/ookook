@@ -17,6 +17,8 @@ struct SettingsView: View {
                 .tabItem { Label("Agents", systemImage: "person.2") }
             MCPTab(store: store)
                 .tabItem { Label("MCP", systemImage: "server.rack") }
+            TerminalAppearanceTab()
+                .tabItem { Label("Terminal", systemImage: "terminal") }
             OokookPreferencesTab()
                 .tabItem { Label("Ookook", systemImage: "gearshape") }
         }
@@ -424,6 +426,89 @@ private struct OokookPreferencesTab: View {
         // pane stay in step without either owning the other.
         .onChange(of: notifySound) { Notifier.shared.soundEnabled = notifySound }
         .onChange(of: notifyBanners) { Notifier.shared.bannersEnabled = notifyBanners }
+    }
+}
+
+/// Font and colours for every terminal. Changes are pushed to the live views,
+/// so the preview below is the same renderer the real thing uses.
+private struct TerminalAppearanceTab: View {
+    @AppStorage(TerminalAppearance.Key.fontName) private var fontName: String = ""
+    @AppStorage(TerminalAppearance.Key.fontSize) private var fontSize: Double = TerminalAppearance.defaultSize
+    @AppStorage(TerminalAppearance.Key.theme) private var themeID: String = TerminalTheme.system.id
+
+    private let families = TerminalAppearance.availableFonts
+
+    var body: some View {
+        Form {
+            Section("Font") {
+                Picker("Family", selection: $fontName) {
+                    Text("System Monospace").tag("")
+                    Divider()
+                    ForEach(families, id: \.self) { family in
+                        Text(family).tag(family)
+                    }
+                }
+                HStack {
+                    Slider(value: $fontSize, in: 9 ... 24, step: 1)
+                    Text("\(Int(fontSize)) pt")
+                        .monospacedDigit()
+                        .frame(width: 46, alignment: .trailing)
+                }
+            }
+
+            Section("Theme") {
+                Picker("Colours", selection: $themeID) {
+                    ForEach(TerminalTheme.all) { theme in
+                        Text(theme.name).tag(theme.id)
+                    }
+                }
+                .pickerStyle(.inline)
+                ThemePreview(theme: TerminalTheme.theme(id: themeID),
+                             font: TerminalAppearance.font)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(16)
+        // Every change repaints the running terminals; they are never rebuilt,
+        // because rebuilding one would throw away its scrollback.
+        .onChange(of: fontName) { TerminalAppearance.broadcast() }
+        .onChange(of: fontSize) { TerminalAppearance.broadcast() }
+        .onChange(of: themeID) { TerminalAppearance.broadcast() }
+    }
+}
+
+/// Enough of a terminal to judge a palette without applying it first.
+private struct ThemePreview: View {
+    let theme: TerminalTheme
+    let font: NSFont
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("~/Projects/ookook %")
+                .foregroundStyle(Color(nsColor: NSColor(hex: theme.foreground)))
+            HStack(spacing: 0) {
+                Text("claude").foregroundStyle(Color(nsColor: NSColor(hex: theme.ansi[5])))
+                Text(" --dangerously-skip-permissions")
+                    .foregroundStyle(Color(nsColor: NSColor(hex: theme.ansi[3])))
+            }
+            Text("✓ 3 files changed")
+                .foregroundStyle(Color(nsColor: NSColor(hex: theme.ansi[2])))
+            Text("✗ error: build failed")
+                .foregroundStyle(Color(nsColor: NSColor(hex: theme.ansi[1])))
+            HStack(spacing: 4) {
+                ForEach(0 ..< 8, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(nsColor: NSColor(hex: theme.ansi[index + 8])))
+                        .frame(width: 16, height: 8)
+                }
+            }
+            .padding(.top, 4)
+        }
+        .font(Font(font as CTFont))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: NSColor(hex: theme.background)))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 

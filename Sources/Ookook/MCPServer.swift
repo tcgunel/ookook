@@ -24,7 +24,7 @@ final class MCPServer: ObservableObject {
             // Hop to the main actor: everything the tools touch is UI state.
             Task { @MainActor in
                 guard let self else { return respond(.empty(status: 503)) }
-                respond(self.handle(request))
+                respond(await self.handle(request))
             }
         }
         do {
@@ -66,7 +66,7 @@ final class MCPServer: ObservableObject {
 
     // MARK: - Request handling
 
-    private func handle(_ request: HTTPServer.Request) -> HTTPServer.Response {
+    private func handle(_ request: HTTPServer.Request) async -> HTTPServer.Response {
         guard request.method == "POST" else { return .empty(status: 405) }
 
         guard let message = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else {
@@ -103,7 +103,7 @@ final class MCPServer: ObservableObject {
             let name = params["name"] as? String ?? ""
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             do {
-                let text = try callTool(named: name, arguments: arguments, pinnedSlug: pinnedSlug)
+                let text = try await callTool(named: name, arguments: arguments, pinnedSlug: pinnedSlug)
                 return .json(Self.result(id: id, [
                     "content": [["type": "text", "text": text]],
                 ]))
@@ -173,9 +173,45 @@ final class MCPServer: ObservableObject {
                     "text": ["type": "string", "description": "The text to type."],
                     "submit": ["type": "boolean", "description": "Press Enter afterwards (default true)."],
                   ]),
+            [
+                "name": "wait_for_port",
+                "description": "Block until a TCP port on localhost is accepting connections, then return. Use this instead of sleeping after start_process: it is how you know a dev server is actually up before hitting it. Give either a process name (its configured port is used) or an explicit port.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "name": ["type": "string", "description": "Process whose configured port to wait for."],
+                        "project": projectArgument,
+                        "port": ["type": "integer", "description": "Port to wait for, if not using a process name."],
+                        "timeout": ["type": "number", "description": "Seconds to wait before giving up (default 60, max 600)."],
+                    ],
+                ],
+            ],
             named("restart_process",
                   "Restart a process - the usual way to pick up a config change or clear a wedged dev server."),
         ]
+    }
+
+    /// One connect attempt against loopback. Off the main actor because
+    /// `connect` blocks for as long as the kernel takes to refuse.
+    private static func portIsOpen(_ port: UInt16) async -> Bool {
+        await Task.detached(priority: .utility) { () -> Bool in
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { return false }
+            defer { close(fd) }
+            var timeout = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = port.bigEndian
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let result = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            return result == 0
+        }.value
     }
 
     private static func pinnedSlug(from path: String) -> String? {
@@ -216,7 +252,9 @@ final class MCPServer: ObservableObject {
         app.projects.map { "\($0.name) (\(slug(for: $0)))" }.joined(separator: ", ")
     }
 
-    private func callTool(named name: String, arguments: [String: Any], pinnedSlug: String?) throws -> String {
+    private func callTool(named name: String,
+                          arguments: [String: Any],
+                          pinnedSlug: String?) async throws -> String {
         guard let app else { throw ToolError.message("Ookook is not ready.") }
 
         switch name {
@@ -308,6 +346,35 @@ final class MCPServer: ObservableObject {
             }
             controller.send(text: text, submit: arguments["submit"] as? Bool ?? true)
             return "Sent to \(controller.spec.name): \(text)"
+
+        case "wait_for_port":
+            let timeout = min(max((arguments["timeout"] as? Double) ?? 60, 1), 600)
+            let port: UInt16
+            if let explicit = arguments["port"] as? Int, (1...65535).contains(explicit) {
+                port = UInt16(explicit)
+            } else {
+                let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+                let controller = try self.controller(named: arguments["name"], in: project)
+                guard let configured = controller.spec.port else {
+                    throw ToolError.message(
+                        "\(controller.spec.name) has no `port:` in ookook.yml, so pass an explicit `port`.")
+                }
+                port = UInt16(configured)
+            }
+            let started = Date()
+            // Poll rather than watch: a listener appearing is not something the
+            // OS will tell us about, and a connect attempt is the same check the
+            // caller would make anyway.
+            while Date().timeIntervalSince(started) < timeout {
+                if await Self.portIsOpen(port) {
+                    let waited = Date().timeIntervalSince(started)
+                    return String(format: "Port %d is accepting connections (after %.1fs).", Int(port), waited)
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            throw ToolError.message(
+                "Port \(port) was not accepting connections within \(Int(timeout))s. "
+                + "Check the process output with get_process_output - it may have failed to start.")
 
         case "restart_process":
             let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
