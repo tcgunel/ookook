@@ -16,6 +16,13 @@ struct GridView: View {
 
     /// 0 means "fit as many as the window allows"; otherwise a fixed count.
     let columnCount: Int
+    /// Where tile order lives. A grid drag writes the same layout a sidebar
+    /// drag does, so the two views can never disagree about the order.
+    @ObservedObject var layout: SidebarLayoutStore
+    /// Controllers per project, needed to seed a layout on the first drag.
+    let controllersByProject: [String: [ProcessController]]
+    /// Cross-project drops reorder the projects instead.
+    let onMoveProject: (String, String) -> Void
 
     private var columns: [GridItem] {
         if columnCount > 0 {
@@ -32,11 +39,29 @@ struct GridView: View {
                              projectName: projectNames.count > 1 ? projectNames[controller.projectID] : nil,
                              isSelected: controller.ref == selection,
                              onSelect: { selection = controller.ref },
-                             onFocus: { onFocus(controller.ref) })
+                             onFocus: { onFocus(controller.ref) },
+                             onDrop: { dragged in drop(dragged, before: controller.ref) })
                 }
             }
             .padding(10)
         }
+    }
+
+    private func drop(_ dragged: ProcessRef, before target: ProcessRef) {
+        guard dragged != target else { return }
+        guard dragged.project == target.project else {
+            onMoveProject(dragged.project, target.project)
+            return
+        }
+        let project = target.project
+        let controllers = controllersByProject[project] ?? []
+        layout.adoptKindLayout(projectID: project, controllers: controllers)
+        let groups = layout.layout(for: project).groups
+        // Land it in whichever group the tile it was dropped on lives in;
+        // across groups this is a move, within one it is a reorder.
+        guard let groupID = groups.first(where: { $0.members.contains(target.process) })?.id
+        else { return }
+        layout.move(dragged, toGroup: groupID, before: target)
     }
 }
 
@@ -46,6 +71,9 @@ private struct GridTile: View {
     let isSelected: Bool
     let onSelect: () -> Void
     let onFocus: () -> Void
+    let onDrop: (ProcessRef) -> Void
+
+    @State private var isTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,13 +85,19 @@ private struct GridTile: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(isSelected ? Color.accentColor : Color.secondary.opacity(0.25),
-                              lineWidth: isSelected ? 2 : 1)
+                .strokeBorder(borderColor, lineWidth: isTargeted || isSelected ? 2 : 1)
         )
         .frame(height: 300)
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onFocus)
         .onTapGesture(perform: onSelect)
+        // The whole tile accepts a drop, but only the header starts a drag:
+        // dragging from the terminal body would fight text selection in it.
+        .dropDestination(for: DraggedProcess.self) { items, _ in
+            guard let dragged = items.first else { return false }
+            onDrop(dragged.ref)
+            return true
+        } isTargeted: { isTargeted = $0 }
     }
 
     private var header: some View {
@@ -98,5 +132,13 @@ private struct GridTile: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(Color(nsColor: .underPageBackgroundColor))
+        .contentShape(Rectangle())
+        .processDraggable(controller.ref)
+        .help("Drag to reorder")
+    }
+
+    private var borderColor: Color {
+        if isTargeted { return .accentColor }
+        return isSelected ? .accentColor : .secondary.opacity(0.25)
     }
 }

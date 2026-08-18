@@ -78,12 +78,31 @@ final class AppModel: ObservableObject {
 
     /// Everything the grid should draw: hidden processes keep running and stay
     /// in the sidebar, they just stop taking up a tile.
+    /// Grid order, and the order the sidebar shows. Reading it through the
+    /// layout store is what makes a sidebar drag reorder the grid too - before,
+    /// the grid used the raw `ookook.yml` order and ignored every arrangement
+    /// the user made.
     var visibleControllers: [ProcessController] {
         projects.flatMap { project in
-            project.controllers.filter {
-                !layout.isHidden(projectID: project.id, process: $0.spec.name)
-            }
+            layout.sections(projectID: project.id, controllers: project.controllers)
+                .flatMap(\.controllers)
+                .filter { !layout.isHidden(projectID: project.id, process: $0.spec.name) }
         }
+    }
+
+    /// Reorders whole projects. A grid mixes tiles from every open project, so
+    /// a drag between two of them cannot mean "reorder within a project" -
+    /// there is no shared list to reorder. Moving the source project's block to
+    /// the target's position is the only reading that leaves the tiles where
+    /// the user dropped them.
+    func moveProject(_ id: String, before targetID: String) {
+        guard id != targetID,
+              let from = projects.firstIndex(where: { $0.id == id }),
+              let target = projects.firstIndex(where: { $0.id == targetID }) else { return }
+        let project = projects.remove(at: from)
+        let insertion = projects.firstIndex(where: { $0.id == targetID }) ?? target
+        projects.insert(project, at: insertion)
+        persistOpenProjects()
     }
 
     func project(id: String) -> Project? {

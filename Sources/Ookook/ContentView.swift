@@ -140,7 +140,10 @@ struct ContentView: View {
                          app.selection = ref
                          mode = .single
                      },
-                     columnCount: gridColumns)
+                     columnCount: gridColumns,
+                     layout: app.layout,
+                     controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
+                     onMoveProject: { app.moveProject($0, before: $1) })
         } else if let controller = app.selectedController {
             TerminalPane(controller: controller)
                 .id(controller.ref.id)
