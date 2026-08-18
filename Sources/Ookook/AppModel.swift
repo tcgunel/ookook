@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     let resources = ResourceMonitor()
     let agents = AgentMonitor()
     let git = GitMonitor()
+    let layout = SidebarLayoutStore()
+    let localProcesses = LocalProcessStore()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
@@ -68,6 +70,16 @@ final class AppModel: ObservableObject {
         return project(id: selection.project)?.controller(named: selection.process)
     }
 
+    /// Everything the grid should draw: hidden processes keep running and stay
+    /// in the sidebar, they just stop taking up a tile.
+    var visibleControllers: [ProcessController] {
+        projects.flatMap { project in
+            project.controllers.filter {
+                !layout.isHidden(projectID: project.id, process: $0.spec.name)
+            }
+        }
+    }
+
     func project(id: String) -> Project? {
         projects.first { $0.id == id }
     }
@@ -80,7 +92,7 @@ final class AppModel: ObservableObject {
             selection = existing.controllers.first.map(\.ref)
             return existing
         }
-        let project = Project(configURL: configURL)
+        let project = Project(configURL: configURL, localProcesses: localProcesses)
         projects.append(project)
         observe(project)
         if selection == nil {
@@ -96,6 +108,8 @@ final class AppModel: ObservableObject {
     func open(path url: URL) -> Project {
         var isDirectory: ObjCBool = false
         FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        // A folder with no ookook.yml still opens: it becomes an empty project
+        // the user can add agents and terminals to.
         let configURL = isDirectory.boolValue
             ? (Project.findConfig(startingAt: url) ?? url.appendingPathComponent("ookook.yml"))
             : url
@@ -145,8 +159,16 @@ final class AppModel: ObservableObject {
     /// are dropped silently rather than surfacing as errors on launch.
     func restoreOpenProjects() {
         let paths = UserDefaults.standard.stringArray(forKey: Self.openProjectsKey) ?? []
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            open(configURL: URL(fileURLWithPath: path))
+        for path in paths {
+            // A project without an ookook.yml is legitimate - the config path is
+            // still where one would go, so what has to still exist is the
+            // project directory, not the file.
+            let configURL = URL(fileURLWithPath: path)
+            var isDirectory: ObjCBool = false
+            let root = configURL.deletingLastPathComponent()
+            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+            open(configURL: configURL)
         }
     }
 

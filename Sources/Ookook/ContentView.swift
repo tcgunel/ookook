@@ -82,6 +82,7 @@ struct ContentView: View {
                                resources: app.resources,
                                agents: app.agents,
                                git: app.git,
+                               layout: app.layout,
                                onClose: { app.close(project) })
             }
         }
@@ -100,7 +101,7 @@ struct ContentView: View {
                 message: "Open a project folder with ⌘O. Ookook looks for an ookook.yml inside it.",
                 systemImage: "folder.badge.plus")
         } else if mode == .grid {
-            GridView(controllers: app.projects.flatMap(\.controllers),
+            GridView(controllers: app.visibleControllers,
                      projectNames: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.name) }),
                      selection: $app.selection,
                      onFocus: { ref in
@@ -132,7 +133,12 @@ private struct ProjectSection: View {
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
     @ObservedObject var git: GitMonitor
+    @ObservedObject var layout: SidebarLayoutStore
     let onClose: () -> Void
+
+    /// What the rename sheet is currently editing.
+    @State private var renaming: RenameTarget?
+    @State private var addingCommand = false
 
     var body: some View {
         Section(isExpanded: $project.isExpanded) {
@@ -142,8 +148,18 @@ private struct ProjectSection: View {
                     .foregroundStyle(.red)
                     .lineLimit(3)
             }
-            ForEach(project.sections) { section in
-                KindGroup(section: section, resources: resources, agents: agents)
+            if project.loadError == nil && project.controllers.isEmpty {
+                Button("Add Claude Code here") { project.add(.claudeAgent()) }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+            ForEach(layout.sections(projectID: project.id, controllers: project.controllers)) { section in
+                SidebarGroupView(project: project,
+                                 section: section,
+                                 resources: resources,
+                                 agents: agents,
+                                 layout: layout,
+                                 onRename: { renaming = $0 })
             }
         } header: {
             HStack(spacing: 6) {
@@ -160,7 +176,34 @@ private struct ProjectSection: View {
                     .foregroundStyle(.secondary)
             }
             .help(project.rootURL.path)
+            .sheet(isPresented: $addingCommand) {
+                NewCommandSheet { name, command in
+                    project.add(.command(named: name, command: command))
+                }
+            }
+            .sheet(item: $renaming) { target in
+                RenameSheet(target: target) { newName in
+                    switch target {
+                    case .process(let projectID, let process, _):
+                        layout.rename(projectID: projectID, process: process, to: newName)
+                    case .group(let projectID, let id, _):
+                        layout.renameGroup(projectID: projectID, id: id, to: newName)
+                    }
+                }
+            }
             .contextMenu {
+                Button("Add Claude Code") { project.add(.claudeAgent()) }
+                Button("Add Terminal") { project.add(.shell()) }
+                Button("Add Command…") { addingCommand = true }
+                Divider()
+                Button("New Group…") {
+                    let id = layout.createGroup(projectID: project.id,
+                                                named: "New Group",
+                                                controllers: project.controllers)
+                    renaming = .group(project: project.id, id: id, current: "New Group")
+                }
+                Button("Reset Sidebar Layout") { layout.resetLayout(projectID: project.id) }
+                Divider()
                 Button("Reload Config") { project.load() }
                 Button("Start All in \(project.name)") { project.startAll() }
                 Button("Stop All in \(project.name)") { project.stopAll() }
@@ -174,47 +217,140 @@ private struct ProjectSection: View {
     }
 }
 
-/// One kind of process (agents / commands / terminals) inside a project.
-private struct KindGroup: View {
-    let section: ProcessSection_Model
+/// One sidebar group: a user-defined group when the project has a custom
+/// layout, otherwise one of the agent/command/terminal kinds.
+private struct SidebarGroupView: View {
+    @ObservedObject var project: Project
+    let section: SidebarSection
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
+    @ObservedObject var layout: SidebarLayoutStore
+    let onRename: (RenameTarget) -> Void
+
     @State private var expanded = true
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(section.controllers) { controller in
                 ProcessRow(controller: controller,
+                           label: layout.displayName(projectID: project.id,
+                                                     process: controller.spec.name),
                            memory: resources.memoryByProcess[controller.ref.id],
-                           session: agents.sessions[controller.ref.id])
+                           session: agents.sessions[controller.ref.id],
+                           onRename: {
+                               onRename(.process(project: project.id,
+                                                 process: controller.spec.name,
+                                                 current: layout.displayName(projectID: project.id,
+                                                                             process: controller.spec.name)))
+                           },
+                           onResetName: layout.hasCustomName(projectID: project.id,
+                                                             process: controller.spec.name)
+                               ? { layout.rename(projectID: project.id,
+                                                 process: controller.spec.name,
+                                                 to: "") }
+                               : nil,
+                           onRemove: project.isLocal(process: controller.spec.name)
+                               ? { project.removeLocal(process: controller.spec.name) }
+                               : nil,
+                           isHidden: layout.isHidden(projectID: project.id,
+                                                     process: controller.spec.name),
+                           onToggleHidden: {
+                               layout.setHidden(!layout.isHidden(projectID: project.id,
+                                                                 process: controller.spec.name),
+                                                projectID: project.id,
+                                                process: controller.spec.name)
+                           })
                     .tag(controller.ref)
-
-                // Sub-agents run inside the agent process rather than as
-                // children of it, so they are listed under it but are not
-                // themselves selectable processes.
-                ForEach(agents.sessions[controller.ref.id]?.subagents ?? []) { subagent in
-                    SubagentRow(subagent: subagent)
-                }
+                    .processDraggable(controller.ref)
+                    .processDropTarget(before: controller.ref,
+                                       in: section.groupID,
+                                       projectID: project.id) { ref, placement in
+                        drop(ref, placement)
+                    }
             }
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: section.kind.symbolName)
-                    .font(.system(size: 9))
-                Text(section.kind.sectionTitle)
-                Spacer(minLength: 4)
-                Text("\(section.runningCount)/\(section.controllers.count)")
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+            header
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: section.symbolName)
+                .font(.system(size: 9))
+            Text(section.title)
+            Spacer(minLength: 4)
+            Text("\(section.runningCount)/\(section.controllers.count)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 10, weight: .semibold))
+        .contentShape(Rectangle())
+        .modifier(GroupDropTarget(groupID: section.groupID, projectID: project.id, drop: drop))
+        .contextMenu {
+            if let groupID = section.groupID {
+                Button("Rename Group…") {
+                    onRename(.group(project: project.id, id: groupID, current: section.title.capitalized))
+                }
+                Button("Delete Group") {
+                    layout.deleteGroup(projectID: project.id, id: groupID)
+                }
+            } else {
+                // Kind sections are derived, not stored; there is nothing to
+                // rename until the project has a layout of its own.
+                Button("Customise Groups") {
+                    layout.adoptKindLayout(projectID: project.id, controllers: project.controllers)
+                }
             }
-            .font(.system(size: 10, weight: .semibold))
+        }
+    }
+
+    private func drop(_ ref: ProcessRef, _ placement: DropPlacement) {
+        // The first drag converts the derived kind grouping into a real layout,
+        // so the user starts from what they were already looking at.
+        layout.adoptKindLayout(projectID: project.id, controllers: project.controllers)
+        let groups = layout.layout(for: project.id).groups
+        switch placement {
+        case .before(let target):
+            let groupID = section.groupID
+                ?? groups.first(where: { $0.members.contains(target.process) })?.id
+            layout.move(ref, toGroup: groupID, before: target,
+                        in: project.id, controllers: project.controllers)
+        case .intoGroup(let groupID):
+            layout.move(ref, toGroup: groupID, before: nil,
+                        in: project.id, controllers: project.controllers)
+        }
+    }
+}
+
+/// Only a real group can be an append target; a derived kind section has no id
+/// to append into until the layout is adopted.
+private struct GroupDropTarget: ViewModifier {
+    let groupID: UUID?
+    let projectID: String
+    let drop: (ProcessRef, DropPlacement) -> Void
+
+    func body(content: Content) -> some View {
+        if let groupID {
+            content.processDropTarget(intoGroup: groupID, projectID: projectID, perform: drop)
+        } else {
+            content
         }
     }
 }
 
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
+    let label: String
     let memory: UInt64?
     let session: AgentSession?
+    let onRename: () -> Void
+    /// Present only when the row is showing a user-given name.
+    let onResetName: (() -> Void)?
+    /// Present only for processes added from the UI; config-declared ones
+    /// belong to ookook.yml and cannot be deleted from here.
+    let onRemove: (() -> Void)?
+    let isHidden: Bool
+    let onToggleHidden: () -> Void
 
     /// An agent's own state beats the last line it printed - "Waiting for you"
     /// is more useful than whatever it last rendered to the terminal.
@@ -231,12 +367,18 @@ private struct ProcessRow: View {
                 .padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text(controller.spec.name)
+                    Text(label)
                         .lineLimit(1)
                     // An agent blocked on you is the one thing worth
                     // interrupting for, so it gets the only coloured glyph.
                     if session?.activity.needsAttention == true {
                         AttentionBell()
+                    }
+                    if isHidden {
+                        Image(systemName: "eye.slash")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .help("Hidden from the grid; still running")
                     }
                     Spacer(minLength: 4)
                     if let port = controller.spec.port {
@@ -267,11 +409,23 @@ private struct ProcessRow: View {
             }
         }
         .padding(.vertical, 2)
+        .opacity(isHidden ? 0.55 : 1)
         .contextMenu {
+            Button(isHidden ? "Show in Grid" : "Hide from Grid", action: onToggleHidden)
+            Divider()
+            Button("Rename…", action: onRename)
+            if let onResetName {
+                Button("Use Name from ookook.yml", action: onResetName)
+            }
+            Divider()
             Button(controller.status.isRunning ? "Stop" : "Start") {
                 controller.status.isRunning ? controller.stop() : controller.start()
             }
             Button("Restart") { controller.restart() }
+            if let onRemove {
+                Divider()
+                Button("Remove", role: .destructive, action: onRemove)
+            }
         }
     }
 }
@@ -330,6 +484,120 @@ private struct SubagentRow: View {
         var parts = ["\(AgentSession.compactTokens(tokens)) ctx"]
         if let workflow = subagent.workflow { parts.append(workflow) }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// What a rename sheet is editing. Renaming a process only sets a label: the
+/// name in `ookook.yml` stays the identity, so a rename cannot break the MCP
+/// tools, the layout, or a teammate's checkout.
+enum RenameTarget: Identifiable {
+    case process(project: String, process: String, current: String)
+    case group(project: String, id: UUID, current: String)
+
+    var id: String {
+        switch self {
+        case .process(let project, let process, _): return "p\u{1F}\(project)\u{1F}\(process)"
+        case .group(_, let id, _): return "g\u{1F}\(id.uuidString)"
+        }
+    }
+
+    var current: String {
+        switch self {
+        case .process(_, _, let current), .group(_, _, let current): return current
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .process: return "Rename Process"
+        case .group: return "Rename Group"
+        }
+    }
+
+    var footnote: String? {
+        switch self {
+        case .process: return "Only changes the label here. The name in ookook.yml is unchanged."
+        case .group: return nil
+        }
+    }
+}
+
+/// Adding an arbitrary command needs two fields; agents and shells are
+/// one-click because their command is always the same.
+private struct NewCommandSheet: View {
+    let onCommit: (String, String) -> Void
+
+    @State private var name = ""
+    @State private var command = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add Command").font(.headline)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+            TextField("Command", text: $command)
+                .textFieldStyle(.roundedBorder)
+            Text("Runs in the project folder, through your login shell.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    onCommit(name.isEmpty ? "command" : name, command)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(command.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 340)
+    }
+}
+
+private struct RenameSheet: View {
+    let target: RenameTarget
+    let onCommit: (String) -> Void
+
+    @State private var name: String
+    @Environment(\.dismiss) private var dismiss
+
+    init(target: RenameTarget, onCommit: @escaping (String) -> Void) {
+        self.target = target
+        self.onCommit = onCommit
+        _name = State(initialValue: target.current)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(target.title).font(.headline)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+                .onSubmit(commit)
+            if let footnote = target.footnote {
+                Text(footnote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 260, alignment: .leading)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename", action: commit)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+    }
+
+    private func commit() {
+        onCommit(name)
+        dismiss()
     }
 }
 

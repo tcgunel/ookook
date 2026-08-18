@@ -23,9 +23,14 @@ final class Project: ObservableObject, Identifiable {
         config?.name ?? rootURL.lastPathComponent
     }
 
-    init(configURL: URL) {
+    /// Processes the user added from the UI; merged with whatever the config
+    /// declares so a plain folder with no ookook.yml is still a usable project.
+    private weak var localProcesses: LocalProcessStore?
+
+    init(configURL: URL, localProcesses: LocalProcessStore? = nil) {
         self.configURL = configURL
         self.id = configURL.deletingLastPathComponent().standardizedFileURL.path
+        self.localProcesses = localProcesses
         load()
     }
 
@@ -33,23 +38,61 @@ final class Project: ObservableObject, Identifiable {
     /// first so a reload never leaks an orphaned child.
     func load() {
         stopAll()
-        do {
-            let config = try ProjectConfig.load(from: configURL)
-            self.config = config
+
+        var config: ProjectConfig
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            do {
+                config = try ProjectConfig.load(from: configURL)
+                self.loadError = nil
+            } catch {
+                // A config that exists but does not parse is a real error worth
+                // showing; a folder with no config at all is not.
+                self.config = nil
+                self.controllers = []
+                self.loadError = error.localizedDescription
+                return
+            }
+        } else {
+            config = ProjectConfig(name: rootURL.lastPathComponent, processes: [])
+            config.rootURL = rootURL
             self.loadError = nil
-            self.controllers = config.processes.map { spec in
-                ProcessController(spec: spec,
-                                  projectID: id,
-                                  workingDirectory: config.workingDirectory(for: spec))
-            }
-            for controller in controllers where controller.spec.startsAutomatically {
-                controller.start()
-            }
-        } catch {
-            self.config = nil
-            self.controllers = []
-            self.loadError = error.localizedDescription
         }
+
+        self.config = config
+        let specs = config.processes + (localProcesses?.specs(for: id) ?? [])
+        self.controllers = specs.map { spec in
+            ProcessController(spec: spec,
+                              projectID: id,
+                              workingDirectory: config.workingDirectory(for: spec))
+        }
+        for controller in controllers where controller.spec.startsAutomatically {
+            controller.start()
+        }
+    }
+
+    /// Adds a process at runtime and starts it, without touching ookook.yml.
+    func add(_ spec: ProcessSpec) {
+        guard let store = localProcesses else { return }
+        let added = store.add(spec, to: id, existing: controllers.map(\.spec.name))
+        guard let config else { return }
+        let controller = ProcessController(spec: added,
+                                           projectID: id,
+                                           workingDirectory: config.workingDirectory(for: added))
+        controllers.append(controller)
+        if added.startsAutomatically { controller.start() }
+    }
+
+    /// Removes a process the user added. Config-declared processes are left
+    /// alone - those belong to ookook.yml, not to the UI.
+    func removeLocal(process: String) {
+        guard let store = localProcesses, store.isLocal(projectID: id, process: process) else { return }
+        controllers.first { $0.spec.name == process }?.stop()
+        controllers.removeAll { $0.spec.name == process }
+        store.remove(process: process, from: id)
+    }
+
+    func isLocal(process: String) -> Bool {
+        localProcesses?.isLocal(projectID: id, process: process) ?? false
     }
 
     func startAll() { controllers.forEach { $0.start() } }

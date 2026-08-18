@@ -19,6 +19,14 @@ struct SidebarGroup: Codable, Identifiable, Hashable {
 /// keeps `ProcessKind` the default grouping instead of a special case.
 struct ProjectLayout: Codable, Equatable {
     var groups: [SidebarGroup] = []
+    /// Display names the user has given processes, keyed by the name in
+    /// `ookook.yml`. The config name stays the identity - it is what
+    /// `ProcessRef`, the MCP tools and the layout all key off - so renaming is
+    /// a label, not a rename of the thing itself.
+    var names: [String: String] = [:]
+    /// Processes hidden from the grid. They keep running - this is about
+    /// getting something out of your eyeline, not stopping it.
+    var hidden: Set<String> = []
 
     var isCustom: Bool { !groups.isEmpty }
 
@@ -76,6 +84,25 @@ final class SidebarLayoutStore: ObservableObject {
 
     func isCustom(projectID: String) -> Bool {
         layout(for: projectID).isCustom
+    }
+
+    /// What to show for a process: the user's label, or its config name.
+    func displayName(projectID: String, process: String) -> String {
+        layout(for: projectID).names[process] ?? process
+    }
+
+    func hasCustomName(projectID: String, process: String) -> Bool {
+        layout(for: projectID).names[process] != nil
+    }
+
+    func isHidden(projectID: String, process: String) -> Bool {
+        layout(for: projectID).hidden.contains(process)
+    }
+
+    func setHidden(_ hidden: Bool, projectID: String, process: String) {
+        update(projectID) { layout in
+            if hidden { layout.hidden.insert(process) } else { layout.hidden.remove(process) }
+        }
     }
 
     /// Sections to render for a project.
@@ -222,6 +249,19 @@ final class SidebarLayoutStore: ObservableObject {
         guard ref.project == projectID else { return }
         adoptKindLayout(projectID: projectID, controllers: controllers)
         move(ref, toGroup: groupID, before: before)
+    }
+
+    /// An empty or unchanged name clears the override rather than storing a
+    /// duplicate of the config name.
+    func rename(projectID: String, process: String, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        update(projectID) { layout in
+            if trimmed.isEmpty || trimmed == process {
+                layout.names.removeValue(forKey: process)
+            } else {
+                layout.names[process] = trimmed
+            }
+        }
     }
 
     func resetLayout(projectID: String) {
