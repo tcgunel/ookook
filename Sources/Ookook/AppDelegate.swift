@@ -71,6 +71,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func openSettings(_ sender: Any?) {
+        // The selected project's .claude folder is shown beside the user's own;
+        // with nothing selected the project tabs are simply absent.
+        let root = (app.selection?.project).flatMap { app.project(id: $0)?.rootURL }
+        SettingsWindowController.shared.show(projectRoot: root)
+    }
+
     @objc private func toggleSound(_ sender: NSMenuItem) {
         Notifier.shared.soundEnabled.toggle()
         sender.state = Notifier.shared.soundEnabled ? .on : .off
@@ -98,6 +105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Ookook", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Ookook", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit Ookook", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

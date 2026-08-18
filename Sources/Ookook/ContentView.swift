@@ -81,6 +81,7 @@ struct ContentView: View {
                 ProjectSection(project: project,
                                resources: app.resources,
                                agents: app.agents,
+                               git: app.git,
                                onClose: { app.close(project) })
             }
         }
@@ -130,6 +131,7 @@ private struct ProjectSection: View {
     @ObservedObject var project: Project
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
+    @ObservedObject var git: GitMonitor
     let onClose: () -> Void
 
     var body: some View {
@@ -148,6 +150,9 @@ private struct ProjectSection: View {
                 Text(project.name)
                     .font(.system(size: 11, weight: .bold))
                     .lineLimit(1)
+                if let state = git.states[project.id] {
+                    GitBadge(state: state)
+                }
                 Spacer(minLength: 4)
                 Text("\(project.controllers.filter(\.status.isRunning).count)/\(project.controllers.count)")
                     .font(.system(size: 10))

@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
 
     let resources = ResourceMonitor()
     let agents = AgentMonitor()
+    let git = GitMonitor()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
@@ -86,6 +87,7 @@ final class AppModel: ObservableObject {
             selection = project.controllers.first.map(\.ref)
         }
         persistOpenProjects()
+        syncGitWatchList()
         return project
     }
 
@@ -107,12 +109,20 @@ final class AppModel: ObservableObject {
             selection = projects.first?.controllers.first.map(\.ref)
         }
         persistOpenProjects()
+        syncGitWatchList()
     }
 
     func startAll() { projects.forEach { $0.startAll() } }
     func stopAll() { projects.forEach { $0.stopAll() } }
 
-    func reloadAll() { projects.forEach { $0.load() } }
+    func reloadAll() {
+        projects.forEach { $0.load() }
+        syncGitWatchList()
+    }
+
+    private func syncGitWatchList() {
+        git.watch(projects.map { (id: $0.id, root: $0.rootURL) })
+    }
 
     /// Child `ObservableObject`s do not propagate through `@Published` arrays,
     /// so republish their changes to keep the sidebar live.
@@ -144,9 +154,12 @@ final class AppModel: ObservableObject {
         mcp.start()
         resources.start()
         agents.start()
+        syncGitWatchList()
+        git.start()
     }
 
     func stopServices() {
+        git.stop()
         agents.stop()
         resources.stop()
         mcp.stop()
