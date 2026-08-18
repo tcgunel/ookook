@@ -8,6 +8,8 @@ final class Workspace: ObservableObject {
     @Published private(set) var controllers: [ProcessController] = []
     @Published var selectedID: String?
     @Published var loadError: String?
+    /// Serves this workspace to AI agents; created once and kept for the app's life.
+    private(set) lazy var mcp: MCPServer = MCPServer(workspace: self)
 
     private(set) var configURL: URL?
 
@@ -17,6 +19,16 @@ final class Workspace: ObservableObject {
 
     var selected: ProcessController? {
         controllers.first { $0.id == selectedID }
+    }
+
+    /// Controllers grouped for the sidebar, in a stable kind order, skipping
+    /// kinds the project does not use.
+    var sections: [ProcessSection_Model] {
+        ProcessKind.allCases.compactMap { kind in
+            let members = controllers.filter { $0.spec.kind == kind }
+            guard !members.isEmpty else { return nil }
+            return ProcessSection_Model(kind: kind, controllers: members)
+        }
     }
 
     /// Loads `ookook.yml` and builds controllers. Existing processes are stopped

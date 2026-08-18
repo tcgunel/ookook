@@ -1,6 +1,30 @@
 import Foundation
 import Yams
 
+/// How a process is grouped in the sidebar. Purely presentational, but it is
+/// what makes a stack of ten processes readable at a glance.
+enum ProcessKind: String, Codable, CaseIterable {
+    case agent
+    case command
+    case terminal
+
+    var sectionTitle: String {
+        switch self {
+        case .agent: return "AGENTS"
+        case .command: return "COMMANDS"
+        case .terminal: return "TERMINALS"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .agent: return "sparkles"
+        case .command: return "square.stack.3d.up"
+        case .terminal: return "terminal"
+        }
+    }
+}
+
 /// One supervised process, as declared in `ookook.yml`.
 struct ProcessSpec: Codable, Identifiable, Equatable {
     var name: String
@@ -11,8 +35,15 @@ struct ProcessSpec: Codable, Identifiable, Equatable {
     var cwd: String?
     var autostart: Bool?
     var autorestart: Bool?
+    /// Sidebar grouping; defaults to `command`.
+    var type: ProcessKind?
+    /// Purely informational - shown in the sidebar so you can find the port
+    /// without digging through the log.
+    var port: Int?
 
     var id: String { name }
+
+    var kind: ProcessKind { type ?? .command }
 
     var startsAutomatically: Bool { autostart ?? true }
     var restartsOnCrash: Bool { autorestart ?? false }

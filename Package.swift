@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Ookook",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.18.0"),
         .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),

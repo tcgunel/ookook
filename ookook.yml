@@ -1,15 +1,24 @@
 # Ookook's own dev config - also the worked example.
 name: Ookook
 processes:
-  - name: claude
+  - name: Claude Code
     command: claude
+    type: agent
     autostart: false
 
   - name: build
     command: swift build 2>&1 | tail -40
+    type: command
     autostart: false
+
+  - name: watch
+    command: while true; do date "+%H:%M:%S  waiting for changes"; sleep 5; done
+    type: command
+    autostart: true
+    autorestart: true
 
   # -i matters: a non-interactive shell exits immediately even on a pty.
   - name: shell
     command: exec $SHELL -i -l
+    type: terminal
     autostart: true

@@ -47,7 +47,12 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     nonisolated var id: String { spec.name }
 
-    let terminalView: LocalProcessTerminalView
+    let terminalView: LoggingTerminalView
+
+    /// Last line of output with visible content, shown under the name in the sidebar.
+    @Published private(set) var activity: String?
+
+    var log: ProcessLog { terminalView.log }
 
     /// Consecutive crash count, reset by a clean exit or a manual start. Drives
     /// restart backoff so a process that fails instantly cannot spin the CPU.
@@ -62,13 +67,27 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     init(spec: ProcessSpec, workingDirectory: URL) {
         self.spec = spec
         self.workingDirectory = workingDirectory
-        self.terminalView = LocalProcessTerminalView(
+        self.terminalView = LoggingTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         terminalView.processDelegate = self
+        terminalView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        terminalView.onActivity = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.activity = self.terminalView.log.lastActivity
+            }
+        }
     }
 
     // MARK: - Lifecycle
+
+    /// What the sidebar shows under the process name: live output while running,
+    /// otherwise the lifecycle state.
+    var subtitle: String {
+        if status.isRunning, let activity, !activity.isEmpty { return activity }
+        return status.label
+    }
 
     func start() {
         guard !status.isRunning else { return }

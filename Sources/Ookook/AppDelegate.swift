@@ -24,12 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         workspace.load(configURL: Self.resolveConfigURL())
         window.title = workspace.projectName
+
+        // Agents connect to the app itself; no helper binary to install.
+        workspace.mcp.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     /// Never leave supervised children orphaned when the app goes away.
     func applicationWillTerminate(_ notification: Notification) {
+        workspace.mcp.stop()
         workspace.stopAll()
     }
 

@@ -9,7 +9,6 @@ struct ContentView: View {
         } detail: {
             detail
         }
-        .navigationTitle(workspace.projectName)
         .toolbar {
             ToolbarItemGroup {
                 if let selected = workspace.selected {
@@ -18,15 +17,27 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: selected.status.isRunning ? "stop.fill" : "play.fill")
                     }
-                    .help(selected.status.isRunning ? "Stop" : "Start")
+                    .help(selected.status.isRunning ? "Stop \(selected.spec.name)" : "Start \(selected.spec.name)")
 
                     Button { selected.restart() } label: {
                         Image(systemName: "arrow.clockwise")
                     }
-                    .help("Restart")
+                    .help("Restart \(selected.spec.name)")
+
+                    Divider()
                 }
+                Button { workspace.startAll() } label: {
+                    Image(systemName: "play.circle")
+                }
+                .help("Start all")
+
+                Button { workspace.stopAll() } label: {
+                    Image(systemName: "stop.circle")
+                }
+                .help("Stop all")
+
                 Button { workspace.reload() } label: {
-                    Image(systemName: "doc.badge.gearshape")
+                    Image(systemName: "arrow.triangle.2.circlepath")
                 }
                 .help("Reload ookook.yml")
             }
@@ -35,15 +46,15 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: $workspace.selectedID) {
-            Section("Processes") {
-                ForEach(workspace.controllers) { controller in
-                    ProcessRow(controller: controller)
-                        .tag(controller.id)
-                }
+            ForEach(workspace.sections) { section in
+                ProcessSection(section: section)
             }
         }
         .listStyle(.sidebar)
-        .frame(minWidth: 200)
+        .frame(minWidth: 230)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            MCPStatusBar(mcp: workspace.mcp)
+        }
     }
 
     @ViewBuilder
@@ -65,17 +76,58 @@ struct ContentView: View {
     }
 }
 
+/// One collapsible group of processes, titled by kind and counting how many of
+/// its members are currently running.
+private struct ProcessSection: View {
+    let section: ProcessSection_Model
+    @State private var expanded = true
+
+    var body: some View {
+        Section(isExpanded: $expanded) {
+            ForEach(section.controllers) { controller in
+                ProcessRow(controller: controller)
+                    .tag(controller.id)
+            }
+        } header: {
+            HStack(spacing: 6) {
+                Image(systemName: section.kind.symbolName)
+                    .font(.system(size: 9))
+                Text(section.kind.sectionTitle)
+                Spacer()
+                Text("\(section.runningCount)/\(section.controllers.count)")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .font(.system(size: 10, weight: .semibold))
+        }
+    }
+}
+
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             StatusDot(status: controller.status)
+                .padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
-                Text(controller.spec.name)
-                Text(controller.status.label)
+                HStack(spacing: 6) {
+                    Text(controller.spec.name)
+                        .lineLimit(1)
+                    if let port = controller.spec.port {
+                        Spacer(minLength: 4)
+                        Text(String(port))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(controller.subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(controller.subtitle)
             }
         }
         .padding(.vertical, 2)
