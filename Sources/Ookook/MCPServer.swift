@@ -246,6 +246,13 @@ final class MCPServer: ObservableObject {
                         row += ", context \(summary)"
                     }
                     if let model = session.model { row += ", model \(model)" }
+                    if !session.subagents.isEmpty {
+                        let active = session.subagents.filter(\.isActive).count
+                        row += "\n    sub-agents: \(active) active of \(session.subagents.count) recent"
+                        for subagent in session.subagents.prefix(5) {
+                            row += "\n      - \(subagent.isActive ? "active" : "done"): \(subagent.title)"
+                        }
+                    }
                 }
                 if let activity = controller.activity, !activity.isEmpty {
                     row += "\n    last output: \(activity)"
@@ -263,12 +270,20 @@ final class MCPServer: ObservableObject {
             let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
             let controller = try self.controller(named: arguments["name"], in: project)
             let lines = arguments["lines"] as? Int ?? 100
-            let output = controller.log.tail(lines)
-            guard !output.isEmpty else {
+            let logged = controller.log.tail(lines)
+            // A full-screen TUI writes almost no newlines, so its byte-stream
+            // log stays empty while its screen is full; fall back to what is
+            // actually rendered.
+            if logged.count >= 3 {
+                return "\(controller.spec.name) - last \(logged.count) lines (status: \(controller.status.label)):\n"
+                    + logged.joined(separator: "\n")
+            }
+            let screen = controller.screenText(lines: lines)
+            guard !screen.isEmpty else {
                 return "\(controller.spec.name) has produced no output yet (status: \(controller.status.label))."
             }
-            return "\(controller.spec.name) - last \(output.count) lines (status: \(controller.status.label)):\n"
-                + output.joined(separator: "\n")
+            return "\(controller.spec.name) - current screen (status: \(controller.status.label)):\n"
+                + screen.joined(separator: "\n")
 
         case "start_process":
             let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)

@@ -57,9 +57,24 @@ final class AgentMonitor: ObservableObject {
                 }
             }
             Task { @MainActor [weak self] in
-                self?.sessions = found
+                self?.apply(found)
             }
         }
+    }
+
+    /// Called when an agent's activity changes; carries the process ref id.
+    var onActivityChange: ((String, AgentSession.Activity, AgentSession.Activity) -> Void)?
+
+    /// Publishes the new sample and reports transitions worth alerting on.
+    private func apply(_ found: [String: AgentSession]) {
+        for (id, session) in found {
+            let previous = sessions[id]?.activity
+            if let previous, previous != session.activity {
+                onActivityChange?(id, previous, session.activity)
+            }
+        }
+        sessions = found
+        Notifier.shared.updateBadge(waiting: found.values.filter { $0.activity.needsAttention }.count)
     }
 
     // MARK: - Reading Claude Code state
@@ -75,10 +90,13 @@ final class AgentMonitor: ObservableObject {
         let activity = AgentSession.Activity(rawValue: object["status"] as? String ?? "") ?? .unknown
         var session = AgentSession(sessionID: sessionID, cwd: cwd, activity: activity)
 
-        if let usage = transcriptUsage(sessionID: sessionID, cwd: cwd) {
-            session.model = usage.model
-            session.contextTokens = usage.tokens
-            session.contextLimit = AgentSession.contextLimit(for: usage.model)
+        if let transcript = transcriptURL(sessionID: sessionID, cwd: cwd) {
+            if let usage = usage(in: transcript) {
+                session.model = usage.model
+                session.contextTokens = usage.tokens
+                session.contextLimit = AgentSession.contextLimit(for: usage.model)
+            }
+            session.subagents = subagents(besides: transcript)
         }
         return session
     }
@@ -89,8 +107,7 @@ final class AgentMonitor: ObservableObject {
     /// line is the current context size - summing turns would multiply it many
     /// times over. Compaction resets the figure, which is why the last line is
     /// right and the maximum is not.
-    private static func transcriptUsage(sessionID: String, cwd: String) -> (model: String?, tokens: Int)? {
-        guard let url = transcriptURL(sessionID: sessionID, cwd: cwd) else { return nil }
+    private static func usage(in url: URL) -> (model: String?, tokens: Int)? {
         guard let tail = readTail(of: url, bytes: 512 * 1024) else { return nil }
 
         // The end of the file is bookkeeping (attachments, titles, modes), so
@@ -114,6 +131,74 @@ final class AgentMonitor: ObservableObject {
         }
         return nil
     }
+
+    /// Sub-agent transcripts sit in a `subagents` directory beside the parent's
+    /// transcript, nested a further level when they belong to a workflow.
+    ///
+    /// Only recently-written files are considered: a long-lived session
+    /// accumulates hundreds of finished sub-agents, and listing them all would
+    /// bury the handful that are actually live.
+    private static func subagents(besides transcript: URL) -> [AgentSession.Subagent] {
+        let root = transcript.deletingPathExtension()
+            .appendingPathComponent("subagents")
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return [] }
+
+        let cutoff = Date().addingTimeInterval(-recentWindow)
+        var found: [(date: Date, subagent: AgentSession.Subagent)] = []
+
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            guard url.lastPathComponent.hasPrefix("agent-") else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard modified > cutoff else { continue }
+
+            let workflow = url.deletingLastPathComponent().lastPathComponent
+            let usage = usage(in: url)
+            let subagent = AgentSession.Subagent(
+                id: url.deletingPathExtension().lastPathComponent,
+                title: title(of: url) ?? "Sub-agent",
+                contextTokens: usage?.tokens,
+                model: usage?.model,
+                isActive: modified > Date().addingTimeInterval(-activeWindow),
+                workflow: workflow == "subagents" ? nil : workflow)
+            found.append((modified, subagent))
+        }
+
+        return found
+            .sorted { $0.date > $1.date }
+            .prefix(maxSubagents)
+            .map(\.subagent)
+    }
+
+    /// Sub-agents carry no name, so the first line of the prompt they were given
+    /// is the closest thing to one.
+    private static func title(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 8 * 1024),
+              let text = String(data: head, encoding: .utf8),
+              let firstLine = text.split(separator: "\n").first,
+              let data = firstLine.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = object["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else { return nil }
+
+        let firstMeaningfulLine = content
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { !$0.isEmpty }) ?? ""
+        return firstMeaningfulLine.isEmpty
+            ? nil
+            : String(firstMeaningfulLine.prefix(72))
+    }
+
+    private static let recentWindow: TimeInterval = 30 * 60
+    private static let activeWindow: TimeInterval = 20
+    private static let maxSubagents = 12
 
     /// Transcripts live under a slug of the directory the session was *started*
     /// in, which is not necessarily the directory it works on - so the slug is a

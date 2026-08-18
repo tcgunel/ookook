@@ -23,6 +23,21 @@ struct AgentSession: Equatable {
         }
     }
 
+    /// A sub-agent spawned inside this session (a Task/subagent or a workflow
+    /// step). These are not OS processes - they run inside the one `claude`
+    /// process - so they are discovered from their transcripts, not the
+    /// process table.
+    struct Subagent: Equatable, Identifiable {
+        var id: String
+        var title: String
+        var contextTokens: Int?
+        var model: String?
+        /// Whether its transcript is still being written.
+        var isActive: Bool
+        /// The workflow it belongs to, when it is part of one.
+        var workflow: String?
+    }
+
     var sessionID: String
     var cwd: String
     var activity: Activity
@@ -31,6 +46,7 @@ struct AgentSession: Equatable {
     var contextTokens: Int?
     /// Known window for `model`, when we know it.
     var contextLimit: Int?
+    var subagents: [Subagent] = []
 
     /// Fraction of the context window in use, clamped - never render past full.
     var contextFraction: Double? {

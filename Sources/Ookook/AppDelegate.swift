@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Agents connect to the app itself; no helper binary to install.
+        Notifier.shared.requestAuthorization()
         app.startServices()
     }
 
@@ -68,6 +69,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for url in panel.urls {
             app.open(path: url)
         }
+    }
+
+    @objc private func toggleSound(_ sender: NSMenuItem) {
+        Notifier.shared.soundEnabled.toggle()
+        sender.state = Notifier.shared.soundEnabled ? .on : .off
+    }
+
+    @objc private func toggleBanners(_ sender: NSMenuItem) {
+        Notifier.shared.bannersEnabled.toggle()
+        sender.state = Notifier.shared.bannersEnabled ? .on : .off
     }
 
     @objc private func reloadConfig(_ sender: Any?) { app.reloadAll() }
@@ -104,6 +115,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for item in projectMenu.items where item.action != nil { item.target = self }
         projectItem.submenu = projectMenu
         mainMenu.addItem(projectItem)
+
+        let alertsItem = NSMenuItem()
+        let alertsMenu = NSMenu(title: "Alerts")
+        let sound = NSMenuItem(title: "Play Sounds", action: #selector(toggleSound(_:)), keyEquivalent: "")
+        sound.state = Notifier.shared.soundEnabled ? .on : .off
+        sound.target = self
+        alertsMenu.addItem(sound)
+        let banners = NSMenuItem(title: "Show Notifications", action: #selector(toggleBanners(_:)), keyEquivalent: "")
+        banners.state = Notifier.shared.bannersEnabled ? .on : .off
+        banners.target = self
+        alertsMenu.addItem(banners)
+        alertsItem.submenu = alertsMenu
+        mainMenu.addItem(alertsItem)
 
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")

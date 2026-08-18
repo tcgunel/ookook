@@ -202,9 +202,40 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// drives a REPL - the pty makes no distinction between this and a person.
     func send(text: String, submit: Bool) {
         guard status.isRunning else { return }
-        var bytes = Array(text.utf8)
-        if submit { bytes.append(0x0D) }   // carriage return, what a terminal sends for Enter
-        terminalView.send(data: bytes[...])
+        terminalView.send(data: Array(text.utf8)[...])
+        guard submit else { return }
+
+        // Send Enter as its own write, a beat later. A full-screen TUI that
+        // reads the text and the carriage return in one burst treats the whole
+        // thing as a paste, and a pasted newline inserts a line rather than
+        // submitting - the text lands in the prompt and just sits there.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.status.isRunning else { return }
+            self.terminalView.send(data: [0x0D][...])
+        }
+    }
+
+    /// The text currently rendered on screen, newest lines last.
+    ///
+    /// Byte-stream logs are near-useless for full-screen TUIs: they redraw with
+    /// cursor positioning and emit almost no newlines, so the log stays empty
+    /// while the screen is full. Reading what the terminal actually rendered is
+    /// the only way to see what an agent is showing.
+    func screenText(lines limit: Int) -> [String] {
+        let terminal = terminalView.getTerminal()
+        var rows: [String] = []
+        for row in 0..<terminal.rows {
+            guard let line = terminal.getLine(row: row) else { continue }
+            rows.append(line.translateToString(trimRight: true))
+        }
+        // Trim the blank padding a TUI leaves around its frame.
+        while let last = rows.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            rows.removeLast()
+        }
+        while let first = rows.first, first.trimmingCharacters(in: .whitespaces).isEmpty {
+            rows.removeFirst()
+        }
+        return Array(rows.suffix(limit))
     }
 
     // MARK: - Restart policy
@@ -275,6 +306,7 @@ extension ProcessController: LocalProcessTerminalViewDelegate {
         }
 
         status = .crashed(code)
+        Notifier.shared.processCrashed(process: spec.name, project: projectID, code: code)
         guard spec.restartsOnCrash else { return }
         crashStreak += 1
         scheduleRestart()

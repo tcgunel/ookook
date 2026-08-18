@@ -10,6 +10,8 @@ struct ContentView: View {
     @ObservedObject var app: AppModel
     /// Remembered across launches - which layout you work in is a lasting preference.
     @AppStorage("viewMode") private var storedMode: String = ViewMode.single.rawValue
+    /// 0 = fit as many columns as the window allows.
+    @AppStorage("gridColumns") private var gridColumns: Int = 0
 
     private var mode: ViewMode {
         get { ViewMode(rawValue: storedMode) ?? .single }
@@ -30,6 +32,20 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .help("Single pane or grid of every process")
+
+                if mode == .grid {
+                    Picker("Columns", selection: $gridColumns) {
+                        Text("Auto").tag(0)
+                        Text("1").tag(1)
+                        Text("2").tag(2)
+                        Text("3").tag(3)
+                        Text("4").tag(4)
+                        Text("5").tag(5)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 80)
+                    .help("How many tiles per row")
+                }
 
                 Divider()
 
@@ -89,7 +105,8 @@ struct ContentView: View {
                      onFocus: { ref in
                          app.selection = ref
                          mode = .single
-                     })
+                     },
+                     columnCount: gridColumns)
         } else if let controller = app.selectedController {
             TerminalPane(controller: controller)
                 .id(controller.ref.id)
@@ -166,6 +183,13 @@ private struct KindGroup: View {
                            memory: resources.memoryByProcess[controller.ref.id],
                            session: agents.sessions[controller.ref.id])
                     .tag(controller.ref)
+
+                // Sub-agents run inside the agent process rather than as
+                // children of it, so they are listed under it but are not
+                // themselves selectable processes.
+                ForEach(agents.sessions[controller.ref.id]?.subagents ?? []) { subagent in
+                    SubagentRow(subagent: subagent)
+                }
             }
         } label: {
             HStack(spacing: 6) {
@@ -207,10 +231,7 @@ private struct ProcessRow: View {
                     // An agent blocked on you is the one thing worth
                     // interrupting for, so it gets the only coloured glyph.
                     if session?.activity.needsAttention == true {
-                        Image(systemName: "bell.fill")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.orange)
-                            .help("This agent is waiting for you")
+                        AttentionBell()
                     }
                     Spacer(minLength: 4)
                     if let port = controller.spec.port {
@@ -247,6 +268,63 @@ private struct ProcessRow: View {
             }
             Button("Restart") { controller.restart() }
         }
+    }
+}
+
+/// A pulsing bell for an agent that is blocked on you. It animates rather than
+/// sitting still because the whole point is to catch your eye in a sidebar you
+/// are not currently looking at.
+private struct AttentionBell: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        Image(systemName: "bell.fill")
+            .font(.system(size: 8))
+            .foregroundStyle(.orange)
+            .opacity(pulsing ? 0.25 : 1)
+            .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: pulsing)
+            .onAppear { pulsing = true }
+            .onDisappear { pulsing = false }
+            .help("This agent is waiting for you")
+    }
+}
+
+private struct SubagentRow: View {
+    let subagent: AgentSession.Subagent
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "arrow.turn.down.right")
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+                .padding(.top, 3)
+            Circle()
+                .fill(subagent.isActive ? Color.green : Color.secondary.opacity(0.5))
+                .frame(width: 5, height: 5)
+                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(subagent.title)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let tokens = subagent.contextTokens {
+                    Text(detail(tokens: tokens))
+                        .font(.system(size: 9))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 14)
+        .padding(.vertical, 1)
+        .help(subagent.title)
+    }
+
+    private func detail(tokens: Int) -> String {
+        var parts = ["\(AgentSession.compactTokens(tokens)) ctx"]
+        if let workflow = subagent.workflow { parts.append(workflow) }
+        return parts.joined(separator: " · ")
     }
 }
 

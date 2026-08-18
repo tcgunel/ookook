@@ -18,10 +18,38 @@ final class AppModel: ObservableObject {
         agents.pidProvider = { [weak self] in
             self?.runningPIDs() ?? []
         }
+        agents.onActivityChange = { [weak self] id, previous, current in
+            self?.reportAgentTransition(id: id, from: previous, to: current)
+        }
         resources.pidProvider = { [weak self] in
             guard let self else { return [] }
             return self.runningPIDs()
         }
+    }
+
+    /// Only two transitions are worth interrupting for: an agent that stopped
+    /// working, and one that is now blocked on the user. Everything else is
+    /// noise that would train you to ignore the alerts.
+    private func reportAgentTransition(id: String,
+                                       from previous: AgentSession.Activity,
+                                       to current: AgentSession.Activity) {
+        guard previous == .busy else { return }
+        guard let (project, controller) = locate(refID: id) else { return }
+
+        if current.needsAttention {
+            Notifier.shared.agentNeedsAttention(process: controller.spec.name, project: project.name)
+        } else if current == .idle {
+            Notifier.shared.agentFinished(process: controller.spec.name, project: project.name)
+        }
+    }
+
+    private func locate(refID: String) -> (Project, ProcessController)? {
+        for project in projects {
+            if let controller = project.controllers.first(where: { $0.ref.id == refID }) {
+                return (project, controller)
+            }
+        }
+        return nil
     }
 
     private func runningPIDs() -> [(id: String, pid: pid_t)] {

@@ -14,8 +14,14 @@ struct GridView: View {
     /// Called when a tile is double-clicked, to drop back into single-pane focus.
     let onFocus: (ProcessRef) -> Void
 
+    /// 0 means "fit as many as the window allows"; otherwise a fixed count.
+    let columnCount: Int
+
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 320, maximum: 720), spacing: 10)]
+        if columnCount > 0 {
+            return Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
+        }
+        return [GridItem(.adaptive(minimum: 320, maximum: 720), spacing: 10)]
     }
 
     var body: some View {
