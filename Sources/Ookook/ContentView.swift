@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Single pane keeps one big terminal in focus; grid watches everything at once.
 enum ViewMode: String {
@@ -88,9 +89,40 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .frame(minWidth: 250)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            MCPStatusBar(mcp: app.mcp, resources: app.resources)
+        // Right-clicking the empty part of the sidebar is where people reach
+        // for "add a folder", so put it there as well as in the menu bar.
+        .contextMenu {
+            Button("Add Project Folder…") { addProject() }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                Button {
+                    addProject()
+                } label: {
+                    Label("Add Project Folder…", systemImage: "plus")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .help("Open a folder as a project (⌘O)")
+
+                MCPStatusBar(mcp: app.mcp, resources: app.resources)
+            }
+        }
+    }
+
+    /// Same panel the File menu uses - a folder with no ookook.yml is fine,
+    /// you add terminals to it by right-clicking the project afterwards.
+    private func addProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.message = "Choose a project folder or an ookook.yml file."
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { _ = app.open(path: url) }
     }
 
     @ViewBuilder
@@ -98,7 +130,7 @@ struct ContentView: View {
         if app.projects.isEmpty {
             ContentUnavailableMessage(
                 title: "No project open",
-                message: "Open a project folder with ⌘O. Ookook looks for an ookook.yml inside it.",
+                message: "Right-click the sidebar, or press ⌘O, to add a project folder. An ookook.yml is optional - without one you add terminals by right-clicking the project.",
                 systemImage: "folder.badge.plus")
         } else if mode == .grid {
             GridView(controllers: app.visibleControllers,
