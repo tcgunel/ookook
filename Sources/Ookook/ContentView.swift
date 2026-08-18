@@ -1,7 +1,20 @@
 import SwiftUI
 
+/// Single pane keeps one big terminal in focus; grid watches everything at once.
+enum ViewMode: String {
+    case single
+    case grid
+}
+
 struct ContentView: View {
     @ObservedObject var workspace: Workspace
+    /// Remembered across launches - which layout you work in is a lasting preference.
+    @AppStorage("viewMode") private var storedMode: String = ViewMode.single.rawValue
+
+    private var mode: ViewMode {
+        get { ViewMode(rawValue: storedMode) ?? .single }
+        nonmutating set { storedMode = newValue.rawValue }
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -11,6 +24,15 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup {
+                Picker("View", selection: Binding(get: { mode }, set: { mode = $0 })) {
+                    Image(systemName: "rectangle").tag(ViewMode.single)
+                    Image(systemName: "square.grid.2x2").tag(ViewMode.grid)
+                }
+                .pickerStyle(.segmented)
+                .help("Single pane or grid of every process")
+
+                Divider()
+
                 if let selected = workspace.selected {
                     Button {
                         selected.status.isRunning ? selected.stop() : selected.start()
@@ -64,6 +86,13 @@ struct ContentView: View {
                 title: "Couldn't load ookook.yml",
                 message: error,
                 systemImage: "exclamationmark.triangle")
+        } else if mode == .grid, !workspace.controllers.isEmpty {
+            GridView(controllers: workspace.controllers,
+                     selectedID: $workspace.selectedID,
+                     onFocus: { id in
+                         workspace.selectedID = id
+                         mode = .single
+                     })
         } else if let controller = workspace.selected {
             TerminalPane(controller: controller)
                 .id(controller.id)
