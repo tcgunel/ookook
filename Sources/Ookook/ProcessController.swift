@@ -54,6 +54,14 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     var log: ProcessLog { terminalView.log }
 
+    /// PID of the shell we launched, while it is running. Resource sampling walks
+    /// its whole subtree from here.
+    var pid: pid_t? {
+        guard status.isRunning else { return nil }
+        let shellPid = terminalView.process.shellPid
+        return shellPid > 0 ? shellPid : nil
+    }
+
     /// Consecutive crash count, reset by a clean exit or a manual start. Drives
     /// restart backoff so a process that fails instantly cannot spin the CPU.
     private var crashStreak = 0

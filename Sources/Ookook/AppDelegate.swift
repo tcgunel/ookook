@@ -27,12 +27,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Agents connect to the app itself; no helper binary to install.
         workspace.mcp.start()
+        workspace.startMonitoring()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     /// Never leave supervised children orphaned when the app goes away.
     func applicationWillTerminate(_ notification: Notification) {
+        workspace.resources.stop()
         workspace.mcp.stop()
         workspace.stopAll()
     }

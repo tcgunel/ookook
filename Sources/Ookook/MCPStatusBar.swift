@@ -6,6 +6,7 @@ import SwiftUI
 /// MCP link is the reason to use Ookook over a pile of tabs.
 struct MCPStatusBar: View {
     @ObservedObject var mcp: MCPServer
+    @ObservedObject var resources: ResourceMonitor
     @State private var copied = false
 
     var body: some View {
@@ -20,6 +21,13 @@ struct MCPStatusBar: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                if resources.totalMemory > 0 {
+                    Text(resources.totalMemory.formattedBytes)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .help("Total memory used by all running processes")
+                }
                 if mcp.connectCommand != nil {
                     Button {
                         copyConnectCommand()

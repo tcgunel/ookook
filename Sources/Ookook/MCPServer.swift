@@ -161,13 +161,20 @@ final class MCPServer: ObservableObject {
             let rows = workspace.controllers.map { controller -> String in
                 var row = "- \(controller.spec.name) [\(controller.spec.kind.rawValue)]: \(controller.status.label)"
                 if let port = controller.spec.port { row += " port=\(port)" }
+                if let memory = workspace.resources.memoryByProcess[controller.id], memory > 0 {
+                    row += " memory=\(memory.formattedBytes)"
+                }
                 row += "\n    command: \(controller.spec.command)"
                 if let activity = controller.activity, !activity.isEmpty {
                     row += "\n    last output: \(activity)"
                 }
                 return row
             }
-            return "Project: \(workspace.projectName)\n" + rows.joined(separator: "\n")
+            var header = "Project: \(workspace.projectName)"
+            if workspace.resources.totalMemory > 0 {
+                header += " (total memory: \(workspace.resources.totalMemory.formattedBytes))"
+            }
+            return header + "\n" + rows.joined(separator: "\n")
 
         case "get_process_output":
             let controller = try self.controller(named: arguments["name"], in: workspace)

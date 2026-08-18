@@ -69,13 +69,13 @@ struct ContentView: View {
     private var sidebar: some View {
         List(selection: $workspace.selectedID) {
             ForEach(workspace.sections) { section in
-                ProcessSection(section: section)
+                ProcessSection(section: section, resources: workspace.resources)
             }
         }
         .listStyle(.sidebar)
         .frame(minWidth: 230)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            MCPStatusBar(mcp: workspace.mcp)
+            MCPStatusBar(mcp: workspace.mcp, resources: workspace.resources)
         }
     }
 
@@ -109,12 +109,14 @@ struct ContentView: View {
 /// its members are currently running.
 private struct ProcessSection: View {
     let section: ProcessSection_Model
+    @ObservedObject var resources: ResourceMonitor
     @State private var expanded = true
 
     var body: some View {
         Section(isExpanded: $expanded) {
             ForEach(section.controllers) { controller in
-                ProcessRow(controller: controller)
+                ProcessRow(controller: controller,
+                           memory: resources.memoryByProcess[controller.id])
                     .tag(controller.id)
             }
         } header: {
@@ -134,6 +136,7 @@ private struct ProcessSection: View {
 
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
+    let memory: UInt64?
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -143,9 +146,15 @@ private struct ProcessRow: View {
                 HStack(spacing: 6) {
                     Text(controller.spec.name)
                         .lineLimit(1)
+                    Spacer(minLength: 4)
                     if let port = controller.spec.port {
-                        Spacer(minLength: 4)
                         Text(String(port))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    if let memory, memory > 0 {
+                        Text(memory.formattedBytes)
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)

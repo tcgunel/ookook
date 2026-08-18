@@ -10,6 +10,7 @@ final class Workspace: ObservableObject {
     @Published var loadError: String?
     /// Serves this workspace to AI agents; created once and kept for the app's life.
     private(set) lazy var mcp: MCPServer = MCPServer(workspace: self)
+    let resources = ResourceMonitor()
 
     private(set) var configURL: URL?
 
@@ -64,6 +65,17 @@ final class Workspace: ObservableObject {
     func stopAll() { controllers.forEach { $0.stop() } }
 
     /// Searches upward from `directory` for an `ookook.yml`, the way git finds `.git`.
+    /// Wires resource sampling to whatever is currently running.
+    func startMonitoring() {
+        resources.pidProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.controllers.compactMap { controller in
+                controller.pid.map { (id: controller.id, pid: $0) }
+            }
+        }
+        resources.start()
+    }
+
     nonisolated static func findConfig(startingAt directory: URL) -> URL? {
         var current = directory.standardizedFileURL
         while true {
