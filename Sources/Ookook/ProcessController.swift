@@ -39,13 +39,19 @@ enum ProcessStatus: Equatable {
 @MainActor
 final class ProcessController: NSObject, ObservableObject, Identifiable {
     let spec: ProcessSpec
+    /// Which project this belongs to; process names are unique only per project.
+    let projectID: String
     let workingDirectory: URL
 
     @Published private(set) var status: ProcessStatus = .idle
     /// Terminal-reported title, when the child emits one (OSC 0/2).
     @Published private(set) var title: String?
 
-    nonisolated var id: String { spec.name }
+    /// Identity must be unique across projects: two projects may each have a
+    /// process called `dev`, and a name-only id makes SwiftUI drop one of them
+    /// from any ForEach that spans projects.
+    nonisolated var id: String { ref.id }
+    nonisolated var ref: ProcessRef { ProcessRef(project: projectID, process: spec.name) }
 
     let terminalView: LoggingTerminalView
 
@@ -72,8 +78,9 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     private static let maxRestartDelay: TimeInterval = 30
 
-    init(spec: ProcessSpec, workingDirectory: URL) {
+    init(spec: ProcessSpec, projectID: String, workingDirectory: URL) {
         self.spec = spec
+        self.projectID = projectID
         self.workingDirectory = workingDirectory
         self.terminalView = LoggingTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
@@ -136,7 +143,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         terminalView.startProcess(
             executable: shell,
             args: ["-l", "-c", spec.command],
-            environment: Self.childEnvironment(),
+            environment: childEnvironment(),
             execName: nil,
             currentDirectory: workingDirectory.path
         )
@@ -147,8 +154,12 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// leave children without SHELL, HOME, PATH or any tool configuration the
     /// user relies on. Inherit the real environment and set only the terminal
     /// variables the pty needs.
-    private static func childEnvironment() -> [String] {
+    private func childEnvironment() -> [String] {
         var env = ProcessInfo.processInfo.environment
+        // Lets a process (or an agent running in one) know which project and
+        // process it is, without having to be told.
+        env["OOKOOK_PROJECT"] = projectID
+        env["OOKOOK_PROCESS"] = spec.name
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["TERM_PROGRAM"] = "Ookook"

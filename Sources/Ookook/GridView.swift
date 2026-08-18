@@ -7,9 +7,12 @@ import SwiftUI
 /// the single-pane mode uses - so switching modes never loses scrollback.
 struct GridView: View {
     let controllers: [ProcessController]
-    @Binding var selectedID: String?
+    /// Project names are shown on tiles only when more than one is open, so a
+    /// single-project workspace stays uncluttered.
+    let projectNames: [String: String]
+    @Binding var selection: ProcessRef?
     /// Called when a tile is double-clicked, to drop back into single-pane focus.
-    let onFocus: (String) -> Void
+    let onFocus: (ProcessRef) -> Void
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: 320, maximum: 720), spacing: 10)]
@@ -20,9 +23,10 @@ struct GridView: View {
             LazyVGrid(columns: columns, spacing: 10) {
                 ForEach(controllers) { controller in
                     GridTile(controller: controller,
-                             isSelected: controller.id == selectedID,
-                             onSelect: { selectedID = controller.id },
-                             onFocus: { onFocus(controller.id) })
+                             projectName: projectNames.count > 1 ? projectNames[controller.projectID] : nil,
+                             isSelected: controller.ref == selection,
+                             onSelect: { selection = controller.ref },
+                             onFocus: { onFocus(controller.ref) })
                 }
             }
             .padding(10)
@@ -32,6 +36,7 @@ struct GridView: View {
 
 private struct GridTile: View {
     @ObservedObject var controller: ProcessController
+    let projectName: String?
     let isSelected: Bool
     let onSelect: () -> Void
     let onFocus: () -> Void
@@ -58,6 +63,15 @@ private struct GridTile: View {
     private var header: some View {
         HStack(spacing: 6) {
             StatusDot(status: controller.status)
+            if let projectName {
+                Text(projectName)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("/")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
             Text(controller.spec.name)
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)

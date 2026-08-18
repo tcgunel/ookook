@@ -9,14 +9,14 @@ import Foundation
 final class MCPServer: ObservableObject {
     static let defaultPort: UInt16 = 4517
 
-    private weak var workspace: Workspace?
+    private weak var app: AppModel?
     private var http: HTTPServer?
 
     @Published private(set) var port: UInt16?
     @Published private(set) var lastError: String?
 
-    init(workspace: Workspace) {
-        self.workspace = workspace
+    init(app: AppModel) {
+        self.app = app
     }
 
     func start(preferredPort: UInt16 = MCPServer.defaultPort) {
@@ -49,6 +49,21 @@ final class MCPServer: ObservableObject {
         return "claude mcp add --transport http ookook http://127.0.0.1:\(port)/mcp"
     }
 
+    /// A per-project endpoint, for an agent that should always mean one project.
+    func connectCommand(for project: Project) -> String? {
+        guard let port else { return nil }
+        let slug = Self.slug(for: project)
+        return "claude mcp add --transport http ookook-\(slug) http://127.0.0.1:\(port)/mcp/\(slug)"
+    }
+
+    /// Short, URL-safe, human-recognisable project handle.
+    static func slug(for project: Project) -> String {
+        let allowed = project.name.lowercased().map { character -> Character in
+            character.isLetter || character.isNumber ? character : "-"
+        }
+        return String(allowed).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
     // MARK: - Request handling
 
     private func handle(_ request: HTTPServer.Request) -> HTTPServer.Response {
@@ -61,6 +76,9 @@ final class MCPServer: ObservableObject {
         let id = message["id"]
         let method = message["method"] as? String ?? ""
         let params = message["params"] as? [String: Any] ?? [:]
+
+        // /mcp/<slug> pins every call on this connection to one project.
+        let pinnedSlug = Self.pinnedSlug(from: request.path)
 
         // Notifications carry no id and take no response body.
         guard let id else {
@@ -85,7 +103,7 @@ final class MCPServer: ObservableObject {
             let name = params["name"] as? String ?? ""
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             do {
-                let text = try callTool(named: name, arguments: arguments)
+                let text = try callTool(named: name, arguments: arguments, pinnedSlug: pinnedSlug)
                 return .json(Self.result(id: id, [
                     "content": [["type": "text", "text": text]],
                 ]))
@@ -105,63 +123,114 @@ final class MCPServer: ObservableObject {
 
     // MARK: - Tools
 
-    private static let toolDefinitions: [[String: Any]] = [
-        [
-            "name": "list_processes",
-            "description": "List every process in the current Ookook project with its status, kind, command and port. Use this first to see what is running before assuming the state of the dev stack.",
-            "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
-        ],
-        [
-            "name": "get_process_output",
-            "description": "Read the most recent output of one process. Use this to check why something crashed or what a dev server is reporting, instead of guessing.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "name": ["type": "string", "description": "Process name as shown by list_processes."],
-                    "lines": ["type": "integer", "description": "How many trailing lines to return (default 100)."],
-                ],
-                "required": ["name"],
-            ],
-        ],
-        [
-            "name": "start_process",
-            "description": "Start a stopped process.",
-            "inputSchema": [
-                "type": "object",
-                "properties": ["name": ["type": "string"]],
-                "required": ["name"],
-            ],
-        ],
-        [
-            "name": "stop_process",
-            "description": "Stop a running process.",
-            "inputSchema": [
-                "type": "object",
-                "properties": ["name": ["type": "string"]],
-                "required": ["name"],
-            ],
-        ],
-        [
-            "name": "restart_process",
-            "description": "Restart a process - the usual way to pick up a config change or clear a wedged dev server.",
-            "inputSchema": [
-                "type": "object",
-                "properties": ["name": ["type": "string"]],
-                "required": ["name"],
-            ],
-        ],
+    /// Every tool takes an optional `project`; it is only required when several
+    /// projects are open and the client did not connect to a pinned endpoint.
+    private static let projectArgument: [String: Any] = [
+        "type": "string",
+        "description": "Which open project, by name or slug (see list_projects). Optional when only one project is open.",
     ]
 
-    private func callTool(named name: String, arguments: [String: Any]) throws -> String {
-        guard let workspace else { throw ToolError.message("No project is loaded.") }
+    private static var toolDefinitions: [[String: Any]] {
+        func named(_ name: String, _ description: String, extra: [String: Any] = [:]) -> [String: Any] {
+            var properties: [String: Any] = [
+                "name": ["type": "string", "description": "Process name as shown by list_processes."],
+                "project": projectArgument,
+            ]
+            properties.merge(extra) { current, _ in current }
+            return [
+                "name": name,
+                "description": description,
+                "inputSchema": [
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["name"],
+                ],
+            ]
+        }
+
+        return [
+            [
+                "name": "list_projects",
+                "description": "List every project currently open in Ookook, with how many of its processes are running. Call this first when you do not know which projects exist.",
+                "inputSchema": ["type": "object", "properties": [:] as [String: Any]],
+            ],
+            [
+                "name": "list_processes",
+                "description": "List the processes of a project with status, kind, command, port and memory use. Use this before assuming the state of the dev stack.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": ["project": projectArgument],
+                ],
+            ],
+            named("get_process_output",
+                  "Read the most recent output of one process. Use this to find out why something crashed or what a dev server is reporting, instead of guessing.",
+                  extra: ["lines": ["type": "integer", "description": "How many trailing lines to return (default 100)."]]),
+            named("start_process", "Start a stopped process."),
+            named("stop_process", "Stop a running process."),
+            named("restart_process",
+                  "Restart a process - the usual way to pick up a config change or clear a wedged dev server."),
+        ]
+    }
+
+    private static func pinnedSlug(from path: String) -> String? {
+        // "/mcp/sitesoft" -> "sitesoft"; "/mcp" -> nil
+        let parts = path.split(separator: "?")[0].split(separator: "/").map(String.init)
+        guard parts.count >= 2, parts[0] == "mcp" else { return nil }
+        return parts[1]
+    }
+
+    /// Which project a tool call is about.
+    ///
+    /// An explicit argument wins, then the endpoint the client connected to,
+    /// then - only when it is unambiguous - the single open project. With
+    /// several projects open and no hint, the agent is told what to pick from
+    /// rather than being silently pointed at the wrong stack.
+    private func resolveProject(arguments: [String: Any],
+                                pinnedSlug: String?,
+                                in app: AppModel) throws -> Project {
+        if let requested = arguments["project"] as? String, !requested.isEmpty {
+            if let match = app.projects.first(where: { Self.slug(for: $0) == requested.lowercased() })
+                ?? app.projects.first(where: { $0.name.lowercased() == requested.lowercased() })
+                ?? app.projects.first(where: { $0.id == requested }) {
+                return match
+            }
+            throw ToolError.message("No open project named \"\(requested)\". Open projects: \(Self.names(of: app))")
+        }
+        if let pinnedSlug,
+           let match = app.projects.first(where: { Self.slug(for: $0) == pinnedSlug.lowercased() }) {
+            return match
+        }
+        if app.projects.count == 1, let only = app.projects.first { return only }
+        if app.projects.isEmpty { throw ToolError.message("No projects are open in Ookook.") }
+        throw ToolError.message(
+            "Several projects are open, so a `project` argument is required. Open projects: \(Self.names(of: app))")
+    }
+
+    private static func names(of app: AppModel) -> String {
+        app.projects.map { "\($0.name) (\(slug(for: $0)))" }.joined(separator: ", ")
+    }
+
+    private func callTool(named name: String, arguments: [String: Any], pinnedSlug: String?) throws -> String {
+        guard let app else { throw ToolError.message("Ookook is not ready.") }
 
         switch name {
+        case "list_projects":
+            guard !app.projects.isEmpty else { return "No projects are open in Ookook." }
+            return app.projects.map { project in
+                let running = project.controllers.filter { $0.status.isRunning }.count
+                var row = "- \(project.name) (\(Self.slug(for: project))): \(running)/\(project.controllers.count) running"
+                row += "\n    path: \(project.rootURL.path)"
+                if let error = project.loadError { row += "\n    config error: \(error)" }
+                return row
+            }.joined(separator: "\n")
+
         case "list_processes":
+            let workspace = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
             guard !workspace.controllers.isEmpty else { return "No processes are defined in ookook.yml." }
             let rows = workspace.controllers.map { controller -> String in
                 var row = "- \(controller.spec.name) [\(controller.spec.kind.rawValue)]: \(controller.status.label)"
                 if let port = controller.spec.port { row += " port=\(port)" }
-                if let memory = workspace.resources.memoryByProcess[controller.id], memory > 0 {
+                if let memory = app.resources.memoryByProcess[controller.ref.id], memory > 0 {
                     row += " memory=\(memory.formattedBytes)"
                 }
                 row += "\n    command: \(controller.spec.command)"
@@ -170,14 +239,16 @@ final class MCPServer: ObservableObject {
                 }
                 return row
             }
-            var header = "Project: \(workspace.projectName)"
-            if workspace.resources.totalMemory > 0 {
-                header += " (total memory: \(workspace.resources.totalMemory.formattedBytes))"
+            var header = "Project: \(workspace.name)"
+            let projectMemory = workspace.controllers.reduce(UInt64(0)) { total, controller in
+                total + (app.resources.memoryByProcess[controller.ref.id] ?? 0)
             }
+            if projectMemory > 0 { header += " (total memory: \(projectMemory.formattedBytes))" }
             return header + "\n" + rows.joined(separator: "\n")
 
         case "get_process_output":
-            let controller = try self.controller(named: arguments["name"], in: workspace)
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let controller = try self.controller(named: arguments["name"], in: project)
             let lines = arguments["lines"] as? Int ?? 100
             let output = controller.log.tail(lines)
             guard !output.isEmpty else {
@@ -187,17 +258,20 @@ final class MCPServer: ObservableObject {
                 + output.joined(separator: "\n")
 
         case "start_process":
-            let controller = try self.controller(named: arguments["name"], in: workspace)
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let controller = try self.controller(named: arguments["name"], in: project)
             controller.start()
             return "Started \(controller.spec.name)."
 
         case "stop_process":
-            let controller = try self.controller(named: arguments["name"], in: workspace)
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let controller = try self.controller(named: arguments["name"], in: project)
             controller.stop()
             return "Stopped \(controller.spec.name)."
 
         case "restart_process":
-            let controller = try self.controller(named: arguments["name"], in: workspace)
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let controller = try self.controller(named: arguments["name"], in: project)
             controller.restart()
             return "Restarted \(controller.spec.name)."
 
@@ -206,15 +280,12 @@ final class MCPServer: ObservableObject {
         }
     }
 
-    private func controller(named name: Any?, in workspace: Workspace) throws -> ProcessController {
+    private func controller(named name: Any?, in workspace: Project) throws -> ProcessController {
         guard let name = name as? String, !name.isEmpty else {
             throw ToolError.message("A `name` argument is required.")
         }
         // Exact match first, then case-insensitive, so agents are not tripped by casing.
-        if let match = workspace.controllers.first(where: { $0.spec.name == name }) { return match }
-        if let match = workspace.controllers.first(where: { $0.spec.name.lowercased() == name.lowercased() }) {
-            return match
-        }
+        if let match = workspace.controller(named: name) { return match }
         let available = workspace.controllers.map(\.spec.name).joined(separator: ", ")
         throw ToolError.message("No process named \"\(name)\". Available: \(available)")
     }

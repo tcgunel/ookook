@@ -7,7 +7,7 @@ enum ViewMode: String {
 }
 
 struct ContentView: View {
-    @ObservedObject var workspace: Workspace
+    @ObservedObject var app: AppModel
     /// Remembered across launches - which layout you work in is a lasting preference.
     @AppStorage("viewMode") private var storedMode: String = ViewMode.single.rawValue
 
@@ -33,7 +33,7 @@ struct ContentView: View {
 
                 Divider()
 
-                if let selected = workspace.selected {
+                if let selected = app.selectedController {
                     Button {
                         selected.status.isRunning ? selected.stop() : selected.start()
                     } label: {
@@ -48,54 +48,55 @@ struct ContentView: View {
 
                     Divider()
                 }
-                Button { workspace.startAll() } label: {
-                    Image(systemName: "play.circle")
-                }
-                .help("Start all")
 
-                Button { workspace.stopAll() } label: {
-                    Image(systemName: "stop.circle")
-                }
-                .help("Stop all")
-
-                Button { workspace.reload() } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                }
-                .help("Reload ookook.yml")
+                Button { app.startAll() } label: { Image(systemName: "play.circle") }
+                    .help("Start everything, in every project")
+                Button { app.stopAll() } label: { Image(systemName: "stop.circle") }
+                    .help("Stop everything, in every project")
+                Button { app.reloadAll() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
+                    .help("Reload every ookook.yml")
             }
         }
     }
 
     private var sidebar: some View {
-        List(selection: $workspace.selectedID) {
-            ForEach(workspace.sections) { section in
-                ProcessSection(section: section, resources: workspace.resources)
+        List(selection: $app.selection) {
+            ForEach(app.projects) { project in
+                ProjectSection(project: project,
+                               resources: app.resources,
+                               onClose: { app.close(project) })
             }
         }
         .listStyle(.sidebar)
-        .frame(minWidth: 230)
+        .frame(minWidth: 250)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            MCPStatusBar(mcp: workspace.mcp, resources: workspace.resources)
+            MCPStatusBar(mcp: app.mcp, resources: app.resources)
         }
     }
 
     @ViewBuilder
     private var detail: some View {
-        if let error = workspace.loadError {
+        if app.projects.isEmpty {
+            ContentUnavailableMessage(
+                title: "No project open",
+                message: "Open a project folder with ⌘O. Ookook looks for an ookook.yml inside it.",
+                systemImage: "folder.badge.plus")
+        } else if mode == .grid {
+            GridView(controllers: app.projects.flatMap(\.controllers),
+                     projectNames: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.name) }),
+                     selection: $app.selection,
+                     onFocus: { ref in
+                         app.selection = ref
+                         mode = .single
+                     })
+        } else if let controller = app.selectedController {
+            TerminalPane(controller: controller)
+                .id(controller.ref.id)
+        } else if let error = app.projects.compactMap(\.loadError).first {
             ContentUnavailableMessage(
                 title: "Couldn't load ookook.yml",
                 message: error,
                 systemImage: "exclamationmark.triangle")
-        } else if mode == .grid, !workspace.controllers.isEmpty {
-            GridView(controllers: workspace.controllers,
-                     selectedID: $workspace.selectedID,
-                     onFocus: { id in
-                         workspace.selectedID = id
-                         mode = .single
-                     })
-        } else if let controller = workspace.selected {
-            TerminalPane(controller: controller)
-                .id(controller.id)
         } else {
             ContentUnavailableMessage(
                 title: "No processes",
@@ -105,26 +106,69 @@ struct ContentView: View {
     }
 }
 
-/// One collapsible group of processes, titled by kind and counting how many of
-/// its members are currently running.
-private struct ProcessSection: View {
+/// A project and everything under it. Collapsing one is how you get a dozen
+/// projects into a sidebar without scrolling forever.
+private struct ProjectSection: View {
+    @ObservedObject var project: Project
+    @ObservedObject var resources: ResourceMonitor
+    let onClose: () -> Void
+
+    var body: some View {
+        Section(isExpanded: $project.isExpanded) {
+            if let error = project.loadError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
+            ForEach(project.sections) { section in
+                KindGroup(section: section, resources: resources)
+            }
+        } header: {
+            HStack(spacing: 6) {
+                Text(project.name)
+                    .font(.system(size: 11, weight: .bold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("\(project.controllers.filter(\.status.isRunning).count)/\(project.controllers.count)")
+                    .font(.system(size: 10))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            .help(project.rootURL.path)
+            .contextMenu {
+                Button("Reload Config") { project.load() }
+                Button("Start All in \(project.name)") { project.startAll() }
+                Button("Stop All in \(project.name)") { project.stopAll() }
+                Divider()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([project.rootURL])
+                }
+                Button("Close Project") { onClose() }
+            }
+        }
+    }
+}
+
+/// One kind of process (agents / commands / terminals) inside a project.
+private struct KindGroup: View {
     let section: ProcessSection_Model
     @ObservedObject var resources: ResourceMonitor
     @State private var expanded = true
 
     var body: some View {
-        Section(isExpanded: $expanded) {
+        DisclosureGroup(isExpanded: $expanded) {
             ForEach(section.controllers) { controller in
                 ProcessRow(controller: controller,
-                           memory: resources.memoryByProcess[controller.id])
-                    .tag(controller.id)
+                           memory: resources.memoryByProcess[controller.ref.id])
+                    .tag(controller.ref)
             }
-        } header: {
+        } label: {
             HStack(spacing: 6) {
                 Image(systemName: section.kind.symbolName)
                     .font(.system(size: 9))
                 Text(section.kind.sectionTitle)
-                Spacer()
+                Spacer(minLength: 4)
                 Text("\(section.runningCount)/\(section.controllers.count)")
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -169,6 +213,12 @@ private struct ProcessRow: View {
             }
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            Button(controller.status.isRunning ? "Stop" : "Start") {
+                controller.status.isRunning ? controller.stop() : controller.start()
+            }
+            Button("Restart") { controller.restart() }
+        }
     }
 }
 

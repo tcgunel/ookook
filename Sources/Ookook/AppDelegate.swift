@@ -3,61 +3,57 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let workspace = Workspace()
+    private let app = AppModel()
     private var window: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
         window.title = "Ookook"
         window.setFrameAutosaveName("OokookMainWindow")
-        window.contentView = NSHostingView(rootView: ContentView(workspace: workspace))
+        window.contentView = NSHostingView(rootView: ContentView(app: app))
         window.center()
         window.makeKeyAndOrderFront(nil)
         self.window = window
 
         NSApp.activate(ignoringOtherApps: true)
-        workspace.load(configURL: Self.resolveConfigURL())
-        window.title = workspace.projectName
+
+        // A path on the command line opens that project; otherwise pick up
+        // wherever we were last, then fall back to the working directory.
+        if let launchPath = Self.launchPath() {
+            app.open(path: launchPath)
+        } else {
+            app.restoreOpenProjects()
+            if app.projects.isEmpty {
+                let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                if let config = Project.findConfig(startingAt: cwd) {
+                    app.open(configURL: config)
+                }
+            }
+        }
 
         // Agents connect to the app itself; no helper binary to install.
-        workspace.mcp.start()
-        workspace.startMonitoring()
+        app.startServices()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     /// Never leave supervised children orphaned when the app goes away.
     func applicationWillTerminate(_ notification: Notification) {
-        workspace.resources.stop()
-        workspace.mcp.stop()
-        workspace.stopAll()
+        app.stopServices()
+        app.stopAll()
     }
 
-    // MARK: - Config discovery
-
-    /// An explicit path argument wins; otherwise search upward from the working
-    /// directory the way git looks for `.git`.
-    nonisolated private static func resolveConfigURL() -> URL {
+    private nonisolated static func launchPath() -> URL? {
         let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
-        if let first = args.first {
-            let url = URL(fileURLWithPath: (first as NSString).expandingTildeInPath)
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-                if isDirectory.boolValue {
-                    return Workspace.findConfig(startingAt: url)
-                        ?? url.appendingPathComponent("ookook.yml")
-                }
-                return url
-            }
-        }
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        return Workspace.findConfig(startingAt: cwd) ?? cwd.appendingPathComponent("ookook.yml")
+        guard let first = args.first else { return nil }
+        let url = URL(fileURLWithPath: (first as NSString).expandingTildeInPath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     // MARK: - Actions
@@ -66,28 +62,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.message = "Choose a project folder or an ookook.yml file."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        var isDirectory: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-        let configURL = isDirectory.boolValue
-            ? (Workspace.findConfig(startingAt: url) ?? url.appendingPathComponent("ookook.yml"))
-            : url
-        workspace.load(configURL: configURL)
-        window?.title = workspace.projectName
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            app.open(path: url)
+        }
     }
 
-    @objc private func reloadConfig(_ sender: Any?) {
-        workspace.reload()
-    }
+    @objc private func reloadConfig(_ sender: Any?) { app.reloadAll() }
+    @objc private func startAll(_ sender: Any?) { app.startAll() }
+    @objc private func stopAll(_ sender: Any?) { app.stopAll() }
 
-    @objc private func startAll(_ sender: Any?) {
-        workspace.startAll()
-    }
-
-    @objc private func stopAll(_ sender: Any?) {
-        workspace.stopAll()
+    @objc private func closeProject(_ sender: Any?) {
+        guard let id = app.selection?.project, let project = app.project(id: id) else { return }
+        app.close(project)
     }
 
     // MARK: - Menu
@@ -107,7 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let projectItem = NSMenuItem()
         let projectMenu = NSMenu(title: "Project")
         projectMenu.addItem(withTitle: "Open Project…", action: #selector(openProject(_:)), keyEquivalent: "o")
-        projectMenu.addItem(withTitle: "Reload Config", action: #selector(reloadConfig(_:)), keyEquivalent: "r")
+        projectMenu.addItem(withTitle: "Close Project", action: #selector(closeProject(_:)), keyEquivalent: "w")
+        projectMenu.addItem(withTitle: "Reload Configs", action: #selector(reloadConfig(_:)), keyEquivalent: "r")
         projectMenu.addItem(.separator())
         projectMenu.addItem(withTitle: "Start All", action: #selector(startAll(_:)), keyEquivalent: "")
         projectMenu.addItem(withTitle: "Stop All", action: #selector(stopAll(_:)), keyEquivalent: "")
