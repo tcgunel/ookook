@@ -203,15 +203,31 @@ final class AppModel: ObservableObject {
         agents.start()
         syncGitWatchList()
         git.start()
+        startScrollbackSnapshots()
     }
 
-    /// Called on quit: what each terminal was showing is worth more than the
-    /// few milliseconds it costs to write it out.
+    /// A SIGTERM - which is what `pkill`, a crash, or a forced logout sends -
+    /// never runs `applicationWillTerminate`, so relying on quit alone loses
+    /// everything. Snapshotting on a slow timer bounds that loss to one period.
+    private var scrollbackTimer: Timer?
+
+    private func startScrollbackSnapshots(interval: TimeInterval = 30) {
+        scrollbackTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.persistScrollback() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        scrollbackTimer = timer
+    }
+
+    /// Called on quit, on a timer, and when a process stops.
     func persistScrollback() {
         projects.flatMap(\.controllers).forEach { $0.persistScrollback() }
     }
 
     func stopServices() {
+        scrollbackTimer?.invalidate()
+        scrollbackTimer = nil
         git.stop()
         agents.stop()
         resources.stop()

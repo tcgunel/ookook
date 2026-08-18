@@ -115,9 +115,25 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         terminalView.feed(text: "\u{1B}[2m\(body)\r\n── previous session ──\u{1B}[0m\r\n")
     }
 
-    /// Called before the app quits, and whenever a process stops.
+    /// Called before the app quits, when a process stops, and periodically.
+    ///
+    /// Agent TUIs paint with cursor positioning and emit almost no newlines, so
+    /// their line log stays empty however long they run - for those, what is
+    /// worth keeping is the rendered screen, the same fallback the MCP output
+    /// tool uses.
     func persistScrollback() {
-        ScrollbackStore.save(log.tail(ScrollbackStore.maxLines), for: ref)
+        let logged = log.tail(ScrollbackStore.maxLines)
+        let meaningful = logged.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if meaningful.count >= 3 {
+            ScrollbackStore.save(logged, for: ref)
+        } else {
+            let screen = screenText(lines: ScrollbackStore.maxLines)
+            // Nothing on screen either: keep whatever was already stored rather
+            // than replacing a real history with a blank file.
+            guard screen.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+            else { return }
+            ScrollbackStore.save(screen, for: ref)
+        }
     }
 
     deinit {
@@ -150,6 +166,9 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             return
         }
         stopRequested = true
+        // Snapshot before the terminal is torn down: a stopped process is
+        // exactly the one whose last output you want to still be able to read.
+        persistScrollback()
         terminalView.terminate()
     }
 

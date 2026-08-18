@@ -20,6 +20,11 @@ echo "==> Assembling $BUNDLE"
 rm -rf "$BUNDLE"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN_PATH" "$CONTENTS/MacOS/$APP"
+# The icon is committed as built art, not generated here: iconutil needs a full
+# iconset and the source PNG, neither of which belongs in a build step.
+if [[ -f "Resources/Ookook.icns" ]]; then
+    cp "Resources/Ookook.icns" "$CONTENTS/Resources/Ookook.icns"
+fi
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +40,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>        <string>APPL</string>
     <key>LSMinimumSystemVersion</key>     <string>14.0</string>
     <key>NSHighResolutionCapable</key>    <true/>
+    <key>CFBundleIconFile</key>           <string>Ookook</string>
 </dict>
 PLIST
 echo '</plist>' >> "$CONTENTS/Info.plist"
