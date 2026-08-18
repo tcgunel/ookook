@@ -1,0 +1,15 @@
+# Ookook's own dev config - also the worked example.
+name: Ookook
+processes:
+  - name: claude
+    command: claude
+    autostart: false
+
+  - name: build
+    command: swift build 2>&1 | tail -40
+    autostart: false
+
+  # -i matters: a non-interactive shell exits immediately even on a pty.
+  - name: shell
+    command: exec $SHELL -i -l
+    autostart: true
