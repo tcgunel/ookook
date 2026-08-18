@@ -156,17 +156,55 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// variables the pty needs.
     private func childEnvironment() -> [String] {
         var env = ProcessInfo.processInfo.environment
+
+        // Ookook may itself have been launched from inside a Claude Code
+        // session. Those variables mark the *launching* session, and an agent
+        // that inherits them believes it is a child session: it turns off
+        // transcript saving ("inherited CLAUDE_CODE_CHILD_SESSION marker") and
+        // never registers, so the user silently loses their transcripts.
+        // Every process here is a fresh top-level session, so drop them.
+        for key in env.keys where Self.isInheritedSessionMarker(key) {
+            env.removeValue(forKey: key)
+        }
+
         // Lets a process (or an agent running in one) know which project and
         // process it is, without having to be told.
         env["OOKOOK_PROJECT"] = projectID
         env["OOKOOK_PROCESS"] = spec.name
+
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["TERM_PROGRAM"] = "Ookook"
         // Children are supervised individually; a pager that waits for a keypress
         // would look like a hung process in the sidebar.
         env["PAGER"] = env["PAGER"] ?? "cat"
+
+        // Anything the config asks for wins over all of the above.
+        for (key, value) in spec.env ?? [:] {
+            env[key] = value
+        }
         return env.map { "\($0.key)=\($0.value)" }
+    }
+
+    /// Session-scoped Claude Code variables, as opposed to a user's own
+    /// CLAUDE_-prefixed settings, which are left alone.
+    private static func isInheritedSessionMarker(_ key: String) -> Bool {
+        key.hasPrefix("CLAUDE_CODE_")
+            || key == "CLAUDECODE"
+            || key == "CLAUDE_PID"
+            || key == "CLAUDE_EFFORT"
+            || key == "CLAUDE_PROJECT_DIR"
+    }
+
+    /// Types into the process, as if at the keyboard.
+    ///
+    /// This is how an agent answers another agent's prompt, or how a script
+    /// drives a REPL - the pty makes no distinction between this and a person.
+    func send(text: String, submit: Bool) {
+        guard status.isRunning else { return }
+        var bytes = Array(text.utf8)
+        if submit { bytes.append(0x0D) }   // carriage return, what a terminal sends for Enter
+        terminalView.send(data: bytes[...])
     }
 
     // MARK: - Restart policy

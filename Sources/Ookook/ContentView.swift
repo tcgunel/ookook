@@ -64,6 +64,7 @@ struct ContentView: View {
             ForEach(app.projects) { project in
                 ProjectSection(project: project,
                                resources: app.resources,
+                               agents: app.agents,
                                onClose: { app.close(project) })
             }
         }
@@ -111,6 +112,7 @@ struct ContentView: View {
 private struct ProjectSection: View {
     @ObservedObject var project: Project
     @ObservedObject var resources: ResourceMonitor
+    @ObservedObject var agents: AgentMonitor
     let onClose: () -> Void
 
     var body: some View {
@@ -122,7 +124,7 @@ private struct ProjectSection: View {
                     .lineLimit(3)
             }
             ForEach(project.sections) { section in
-                KindGroup(section: section, resources: resources)
+                KindGroup(section: section, resources: resources, agents: agents)
             }
         } header: {
             HStack(spacing: 6) {
@@ -154,13 +156,15 @@ private struct ProjectSection: View {
 private struct KindGroup: View {
     let section: ProcessSection_Model
     @ObservedObject var resources: ResourceMonitor
+    @ObservedObject var agents: AgentMonitor
     @State private var expanded = true
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(section.controllers) { controller in
                 ProcessRow(controller: controller,
-                           memory: resources.memoryByProcess[controller.ref.id])
+                           memory: resources.memoryByProcess[controller.ref.id],
+                           session: agents.sessions[controller.ref.id])
                     .tag(controller.ref)
             }
         } label: {
@@ -181,6 +185,16 @@ private struct KindGroup: View {
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
     let memory: UInt64?
+    let session: AgentSession?
+
+    /// An agent's own state beats the last line it printed - "Waiting for you"
+    /// is more useful than whatever it last rendered to the terminal.
+    private var subtitle: String {
+        if let session, session.activity != .unknown, controller.status.isRunning {
+            return session.activity.label
+        }
+        return controller.subtitle
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -190,6 +204,14 @@ private struct ProcessRow: View {
                 HStack(spacing: 6) {
                     Text(controller.spec.name)
                         .lineLimit(1)
+                    // An agent blocked on you is the one thing worth
+                    // interrupting for, so it gets the only coloured glyph.
+                    if session?.activity.needsAttention == true {
+                        Image(systemName: "bell.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.orange)
+                            .help("This agent is waiting for you")
+                    }
                     Spacer(minLength: 4)
                     if let port = controller.spec.port {
                         Text(String(port))
@@ -204,12 +226,18 @@ private struct ProcessRow: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text(controller.subtitle)
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(controller.subtitle)
+
+                if let session, let fraction = session.contextFraction,
+                   let summary = session.contextSummary {
+                    ContextGauge(fraction: fraction, summary: summary)
+                        .padding(.top, 2)
+                }
             }
         }
         .padding(.vertical, 2)

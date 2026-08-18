@@ -40,6 +40,8 @@ struct ProcessSpec: Codable, Identifiable, Equatable {
     /// Purely informational - shown in the sidebar so you can find the port
     /// without digging through the log.
     var port: Int?
+    /// Extra environment for this process, overriding what it inherits.
+    var env: [String: String]?
 
     var id: String { name }
 

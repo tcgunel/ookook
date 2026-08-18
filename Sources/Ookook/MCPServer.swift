@@ -167,6 +167,12 @@ final class MCPServer: ObservableObject {
                   extra: ["lines": ["type": "integer", "description": "How many trailing lines to return (default 100)."]]),
             named("start_process", "Start a stopped process."),
             named("stop_process", "Stop a running process."),
+            named("send_input",
+                  "Type text into a running process, as if at the keyboard. Use it to answer a prompt another agent is waiting on, or to drive a REPL. Submits with Enter unless submit is false.",
+                  extra: [
+                    "text": ["type": "string", "description": "The text to type."],
+                    "submit": ["type": "boolean", "description": "Press Enter afterwards (default true)."],
+                  ]),
             named("restart_process",
                   "Restart a process - the usual way to pick up a config change or clear a wedged dev server."),
         ]
@@ -234,6 +240,13 @@ final class MCPServer: ObservableObject {
                     row += " memory=\(memory.formattedBytes)"
                 }
                 row += "\n    command: \(controller.spec.command)"
+                if let session = app.agents.sessions[controller.ref.id] {
+                    row += "\n    agent: \(session.activity.label)"
+                    if let summary = session.contextSummary {
+                        row += ", context \(summary)"
+                    }
+                    if let model = session.model { row += ", model \(model)" }
+                }
                 if let activity = controller.activity, !activity.isEmpty {
                     row += "\n    last output: \(activity)"
                 }
@@ -268,6 +281,18 @@ final class MCPServer: ObservableObject {
             let controller = try self.controller(named: arguments["name"], in: project)
             controller.stop()
             return "Stopped \(controller.spec.name)."
+
+        case "send_input":
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let controller = try self.controller(named: arguments["name"], in: project)
+            guard let text = arguments["text"] as? String else {
+                throw ToolError.message("A `text` argument is required.")
+            }
+            guard controller.status.isRunning else {
+                throw ToolError.message("\(controller.spec.name) is not running.")
+            }
+            controller.send(text: text, submit: arguments["submit"] as? Bool ?? true)
+            return "Sent to \(controller.spec.name): \(text)"
 
         case "restart_process":
             let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)

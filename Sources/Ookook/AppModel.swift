@@ -9,17 +9,25 @@ final class AppModel: ObservableObject {
     @Published var selection: ProcessRef?
 
     let resources = ResourceMonitor()
+    let agents = AgentMonitor()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
 
     init() {
+        agents.pidProvider = { [weak self] in
+            self?.runningPIDs() ?? []
+        }
         resources.pidProvider = { [weak self] in
             guard let self else { return [] }
-            return self.projects.flatMap { project in
-                project.controllers.compactMap { controller in
-                    controller.pid.map { (id: controller.ref.id, pid: $0) }
-                }
+            return self.runningPIDs()
+        }
+    }
+
+    private func runningPIDs() -> [(id: String, pid: pid_t)] {
+        projects.flatMap { project in
+            project.controllers.compactMap { controller in
+                controller.pid.map { (id: controller.ref.id, pid: $0) }
             }
         }
     }
@@ -107,9 +115,11 @@ final class AppModel: ObservableObject {
     func startServices() {
         mcp.start()
         resources.start()
+        agents.start()
     }
 
     func stopServices() {
+        agents.stop()
         resources.stop()
         mcp.stop()
     }

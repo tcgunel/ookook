@@ -42,7 +42,7 @@ final class ResourceMonitor: ObservableObject {
             return
         }
         queue.async {
-            let children = Self.childrenByParent()
+            let children = ProcessTree.childrenByParent()
             var results: [String: UInt64] = [:]
             for target in targets {
                 results[target.id] = Self.residentBytesOfTree(rootedAt: target.pid, children: children)
@@ -57,37 +57,10 @@ final class ResourceMonitor: ObservableObject {
 
     // MARK: - Sampling primitives
 
-    /// pid -> its direct children, built from one pass over the process table.
-    private static func childrenByParent() -> [pid_t: [pid_t]] {
-        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var size = 0
-        guard sysctl(&name, 4, nil, &size, nil, 0) == 0, size > 0 else { return [:] }
-
-        let capacity = size / MemoryLayout<kinfo_proc>.stride
-        var table = [kinfo_proc](repeating: kinfo_proc(), count: capacity)
-        guard sysctl(&name, 4, &table, &size, nil, 0) == 0 else { return [:] }
-
-        var map: [pid_t: [pid_t]] = [:]
-        for index in 0..<(size / MemoryLayout<kinfo_proc>.stride) {
-            let pid = table[index].kp_proc.p_pid
-            let parent = table[index].kp_eproc.e_ppid
-            map[parent, default: []].append(pid)
-        }
-        return map
-    }
-
     private static func residentBytesOfTree(rootedAt root: pid_t,
                                             children: [pid_t: [pid_t]]) -> UInt64 {
-        guard root > 0 else { return 0 }
-        var total: UInt64 = 0
-        var stack = [root]
-        var visited = Set<pid_t>()
-        while let pid = stack.popLast() {
-            guard visited.insert(pid).inserted else { continue }
-            total += residentBytes(of: pid)
-            if let next = children[pid] { stack.append(contentsOf: next) }
-        }
-        return total
+        ProcessTree.descendants(of: root, children: children)
+            .reduce(UInt64(0)) { $0 + residentBytes(of: $1) }
     }
 
     private static func residentBytes(of pid: pid_t) -> UInt64 {
