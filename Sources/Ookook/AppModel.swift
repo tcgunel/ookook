@@ -28,6 +28,12 @@ final class AppModel: ObservableObject {
             guard let self else { return [] }
             return self.runningPIDs()
         }
+        // `visibleControllers` reads the layout store, but views observe the
+        // AppModel - without forwarding, hiding a process repainted the
+        // sidebar and left the grid showing the tile it just hid.
+        layout.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// Only two transitions are worth interrupting for: an agent that stopped
