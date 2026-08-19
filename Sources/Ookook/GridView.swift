@@ -28,6 +28,8 @@ struct GridView: View {
     /// backed by `@AppStorage`, and writing UserDefaults on every mouse-move
     /// event is both wasteful and a source of visible stutter.
     @State private var draftHeight: Double?
+    /// The area the grid actually has, reported up so the Fit button can use it.
+    @Binding var measuredSize: CGSize
     /// Where tile order lives. A grid drag writes the same layout a sidebar
     /// drag does, so the two views can never disagree about the order.
     @ObservedObject var layout: SidebarLayoutStore
@@ -45,17 +47,45 @@ struct GridView: View {
 
     static let minTileHeight: Double = 140
     static let maxTileHeight: Double = 1400
+    static let spacing: Double = 10
+    static let padding: Double = 10
+    /// Narrowest a tile is allowed to get before the adaptive grid drops a
+    /// column. Mirrors the `.adaptive(minimum:)` below - they must agree or a
+    /// fit would be computed for a column count the grid does not use.
+    static let minTileWidth: Double = 320
+
+    /// The height that makes every tile fit without scrolling.
+    ///
+    /// Static and pure so the toolbar can ask for it without owning any of the
+    /// grid's layout state.
+    static func fittingHeight(tiles: Int, columns: Int, in size: CGSize) -> Double {
+        guard tiles > 0 else { return 300 }
+        let perRow = max(1, columns > 0
+            ? columns
+            : Int((size.width - padding * 2 + spacing) / (minTileWidth + spacing)))
+        let rows = Double((tiles + perRow - 1) / perRow)
+        let available = size.height - padding * 2 - spacing * (rows - 1)
+        return min(max(available / rows, minTileHeight), maxTileHeight)
+    }
 
     private var columns: [GridItem] {
         if columnCount > 0 {
-            return Array(repeating: GridItem(.flexible(), spacing: 10), count: columnCount)
+            return Array(repeating: GridItem(.flexible(), spacing: Self.spacing), count: columnCount)
         }
-        return [GridItem(.adaptive(minimum: 320, maximum: 720), spacing: 10)]
+        return [GridItem(.adaptive(minimum: Self.minTileWidth, maximum: 720), spacing: Self.spacing)]
     }
 
     var body: some View {
+        GeometryReader { proxy in
+            content
+                .onAppear { measuredSize = proxy.size }
+                .onChange(of: proxy.size) { measuredSize = proxy.size }
+        }
+    }
+
+    private var content: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 10) {
+            LazyVGrid(columns: columns, spacing: Self.spacing) {
                 ForEach(controllers) { controller in
                     GridTile(controller: controller,
                              projectName: projectNames.count > 1 ? projectNames[controller.projectID] : nil,
@@ -96,7 +126,7 @@ struct GridView: View {
                                  : nil)
                 }
             }
-            .padding(10)
+            .padding(Self.padding)
         }
         .sheet(item: $renaming) { target in
             RenameSheet(target: target) { newName in

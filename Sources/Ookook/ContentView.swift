@@ -15,6 +15,8 @@ struct ContentView: View {
     @AppStorage("gridColumns") private var gridColumns: Int = 0
     /// Grid row height, set by dragging a tile's bottom edge.
     @AppStorage("gridTileHeight") private var gridTileHeight: Double = 300
+    /// Reported by the grid, so Fit knows how much room there is.
+    @State private var gridSize: CGSize = .zero
 
     private var mode: ViewMode {
         get { ViewMode(rawValue: storedMode) ?? .single }
@@ -37,6 +39,17 @@ struct ContentView: View {
                 .help("Single pane or grid of every process")
 
                 if mode == .grid {
+                    Button {
+                        gridTileHeight = GridView.fittingHeight(
+                            tiles: app.visibleControllers.count,
+                            columns: gridColumns,
+                            in: gridSize)
+                    } label: {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    }
+                    .help("Fit every tile in the window")
+                    .disabled(gridSize == .zero || app.visibleControllers.isEmpty)
+
                     Picker("Columns", selection: $gridColumns) {
                         Text("Auto").tag(0)
                         Text("1").tag(1)
@@ -145,6 +158,7 @@ struct ContentView: View {
                      },
                      columnCount: gridColumns,
                      tileHeight: $gridTileHeight,
+                     measuredSize: $gridSize,
                      layout: app.layout,
                      controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
                      onMoveProject: { app.moveProject($0, before: $1) },
