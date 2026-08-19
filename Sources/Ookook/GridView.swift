@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Shows every process at once in an adaptive grid, so a wall of running agents
@@ -16,6 +17,17 @@ struct GridView: View {
 
     /// 0 means "fit as many as the window allows"; otherwise a fixed count.
     let columnCount: Int
+    /// Row height, dragged by the grip on any tile's bottom edge. One height for
+    /// the whole grid rather than per tile: rows in a grid share a baseline, so
+    /// a taller tile would only stretch its neighbours to match and the extra
+    /// setting would buy nothing.
+    @Binding var tileHeight: Double
+    /// Height while a drag is in flight.
+    ///
+    /// The committed value is only written when the drag ends: `tileHeight` is
+    /// backed by `@AppStorage`, and writing UserDefaults on every mouse-move
+    /// event is both wasteful and a source of visible stutter.
+    @State private var draftHeight: Double?
     /// Where tile order lives. A grid drag writes the same layout a sidebar
     /// drag does, so the two views can never disagree about the order.
     @ObservedObject var layout: SidebarLayoutStore
@@ -30,6 +42,9 @@ struct GridView: View {
     /// The tile whose name is being edited. The sheet lives here rather than on
     /// the tile so it survives the grid reflowing underneath it.
     @State private var renaming: RenameTarget?
+
+    static let minTileHeight: Double = 140
+    static let maxTileHeight: Double = 1400
 
     private var columns: [GridItem] {
         if columnCount > 0 {
@@ -48,6 +63,12 @@ struct GridView: View {
                              onSelect: { selection = controller.ref },
                              onFocus: { onFocus(controller.ref) },
                              onDrop: { dragged in drop(dragged, before: controller.ref) },
+                             height: draftHeight ?? tileHeight,
+                             onResize: { draftHeight = $0 },
+                             onResizeEnd: {
+                                 if let draftHeight { tileHeight = draftHeight }
+                                 draftHeight = nil
+                             },
                              label: layout.displayName(projectID: controller.projectID,
                                                        process: controller.spec.name),
                              isHidden: layout.isHidden(projectID: controller.projectID,
@@ -111,6 +132,9 @@ private struct GridTile: View {
     let onSelect: () -> Void
     let onFocus: () -> Void
     let onDrop: (ProcessRef) -> Void
+    let height: Double
+    let onResize: (Double) -> Void
+    let onResizeEnd: () -> Void
     let label: String
     let isHidden: Bool
     let onToggleHidden: () -> Void
@@ -119,12 +143,15 @@ private struct GridTile: View {
     let onRemove: (() -> Void)?
 
     @State private var isTargeted = false
+    @State private var isHoveringGrip = false
+    /// Height when the current drag began; nil when not dragging.
+    @State private var dragStartHeight: Double?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             TerminalPane(controller: controller)
-                .frame(minHeight: 200)
+                .frame(minHeight: 60)
         }
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -132,7 +159,8 @@ private struct GridTile: View {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(borderColor, lineWidth: isTargeted || isSelected ? 2 : 1)
         )
-        .frame(height: 300)
+        .frame(height: height)
+        .overlay(alignment: .bottom) { resizeGrip }
         .contentShape(Rectangle())
         .onTapGesture(count: 2, perform: onFocus)
         .onTapGesture(perform: onSelect)
@@ -199,6 +227,49 @@ private struct GridTile: View {
         .processDraggable(controller.ref)
         .contextMenu { actions }
         .help("Drag to reorder")
+    }
+
+    /// A grab strip along the bottom edge. Sized generously (8pt) because a
+    /// 1pt hairline is a target you have to aim at, and the cursor changes on
+    /// hover so it is discoverable without a tooltip.
+    private var resizeGrip: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: 8)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                isHoveringGrip = inside
+                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            // The gesture must measure in a coordinate space that does not move
+            // with what it is resizing. In the grip's own space, growing the
+            // tile drags the grip out from under the cursor, so the next event
+            // measures from a new origin: the tile races away from the pointer
+            // and flickers as the two fight.
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let start = dragStartHeight ?? height
+                        if dragStartHeight == nil { dragStartHeight = start }
+                        let delta = value.location.y - value.startLocation.y
+                        onResize(min(max(start + delta,
+                                         GridView.minTileHeight), GridView.maxTileHeight))
+                    }
+                    .onEnded { _ in
+                        dragStartHeight = nil
+                        onResizeEnd()
+                    })
+            .overlay {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.secondary.opacity(isHoveringGrip ? 0.5 : 0))
+                    .frame(width: 28, height: 3)
+            }
+            // Double-click the grip to go back to the default height, the same
+            // way a window divider resets.
+            .onTapGesture(count: 2) {
+                onResize(300)
+                onResizeEnd()
+            }
     }
 
     @ViewBuilder

@@ -13,6 +13,8 @@ struct ContentView: View {
     @AppStorage("viewMode") private var storedMode: String = ViewMode.single.rawValue
     /// 0 = fit as many columns as the window allows.
     @AppStorage("gridColumns") private var gridColumns: Int = 0
+    /// Grid row height, set by dragging a tile's bottom edge.
+    @AppStorage("gridTileHeight") private var gridTileHeight: Double = 300
 
     private var mode: ViewMode {
         get { ViewMode(rawValue: storedMode) ?? .single }
@@ -142,6 +144,7 @@ struct ContentView: View {
                          mode = .single
                      },
                      columnCount: gridColumns,
+                     tileHeight: $gridTileHeight,
                      layout: app.layout,
                      controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
                      onMoveProject: { app.moveProject($0, before: $1) },
