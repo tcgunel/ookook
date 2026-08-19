@@ -23,6 +23,13 @@ struct GridView: View {
     let controllersByProject: [String: [ProcessController]]
     /// Cross-project drops reorder the projects instead.
     let onMoveProject: (String, String) -> Void
+    /// Removing a process is only offered for ones added from the UI.
+    let canRemove: (ProcessRef) -> Bool
+    let onRemove: (ProcessRef) -> Void
+
+    /// The tile whose name is being edited. The sheet lives here rather than on
+    /// the tile so it survives the grid reflowing underneath it.
+    @State private var renaming: RenameTarget?
 
     private var columns: [GridItem] {
         if columnCount > 0 {
@@ -40,10 +47,42 @@ struct GridView: View {
                              isSelected: controller.ref == selection,
                              onSelect: { selection = controller.ref },
                              onFocus: { onFocus(controller.ref) },
-                             onDrop: { dragged in drop(dragged, before: controller.ref) })
+                             onDrop: { dragged in drop(dragged, before: controller.ref) },
+                             label: layout.displayName(projectID: controller.projectID,
+                                                       process: controller.spec.name),
+                             isHidden: layout.isHidden(projectID: controller.projectID,
+                                                       process: controller.spec.name),
+                             onToggleHidden: {
+                                 layout.setHidden(!layout.isHidden(projectID: controller.projectID,
+                                                                   process: controller.spec.name),
+                                                  projectID: controller.projectID,
+                                                  process: controller.spec.name)
+                             },
+                             onRename: {
+                                 renaming = .process(project: controller.projectID,
+                                                     process: controller.spec.name,
+                                                     current: layout.displayName(
+                                                         projectID: controller.projectID,
+                                                         process: controller.spec.name))
+                             },
+                             onResetName: layout.hasCustomName(projectID: controller.projectID,
+                                                               process: controller.spec.name)
+                                 ? { layout.rename(projectID: controller.projectID,
+                                                   process: controller.spec.name, to: "") }
+                                 : nil,
+                             onRemove: canRemove(controller.ref)
+                                 ? { onRemove(controller.ref) }
+                                 : nil)
                 }
             }
             .padding(10)
+        }
+        .sheet(item: $renaming) { target in
+            RenameSheet(target: target) { newName in
+                if case .process(let projectID, let process, _) = target {
+                    layout.rename(projectID: projectID, process: process, to: newName)
+                }
+            }
         }
     }
 
@@ -72,6 +111,12 @@ private struct GridTile: View {
     let onSelect: () -> Void
     let onFocus: () -> Void
     let onDrop: (ProcessRef) -> Void
+    let label: String
+    let isHidden: Bool
+    let onToggleHidden: () -> Void
+    let onRename: () -> Void
+    let onResetName: (() -> Void)?
+    let onRemove: (() -> Void)?
 
     @State private var isTargeted = false
 
@@ -112,9 +157,15 @@ private struct GridTile: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
-            Text(controller.spec.name)
+            Text(label)
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
+            if isHidden {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .help("Hidden from the grid; still running")
+            }
             Spacer(minLength: 4)
             Button {
                 controller.status.isRunning ? controller.stop() : controller.start()
@@ -128,13 +179,36 @@ private struct GridTile: View {
                     .font(.system(size: 9))
             }
             .buttonStyle(.borderless)
+            // Everything the sidebar row offers, without having to go find the
+            // row: in a grid of a dozen tiles, the tile is what you are looking
+            // at when you decide to rename or hide it.
+            Menu {
+                actions
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 9))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 16)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(Color(nsColor: .underPageBackgroundColor))
         .contentShape(Rectangle())
         .processDraggable(controller.ref)
+        .contextMenu { actions }
         .help("Drag to reorder")
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        ProcessActionItems(controller: controller,
+                           isHidden: isHidden,
+                           onToggleHidden: onToggleHidden,
+                           onRename: onRename,
+                           onResetName: onResetName,
+                           onRemove: onRemove)
     }
 
     private var borderColor: Color {

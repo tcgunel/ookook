@@ -144,7 +144,9 @@ struct ContentView: View {
                      columnCount: gridColumns,
                      layout: app.layout,
                      controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
-                     onMoveProject: { app.moveProject($0, before: $1) })
+                     onMoveProject: { app.moveProject($0, before: $1) },
+                     canRemove: { app.isLocal($0) },
+                     onRemove: { app.removeLocal($0) })
         } else if let controller = app.selectedController {
             TerminalPane(controller: controller)
                 .id(controller.ref.id)
@@ -478,21 +480,12 @@ private struct ProcessRow: View {
         .padding(.vertical, 2)
         .opacity(isHidden ? 0.55 : 1)
         .contextMenu {
-            Button(isHidden ? "Show in Grid" : "Hide from Grid", action: onToggleHidden)
-            Divider()
-            Button("Rename…", action: onRename)
-            if let onResetName {
-                Button("Use Name from ookook.yml", action: onResetName)
-            }
-            Divider()
-            Button(controller.status.isRunning ? "Stop" : "Start") {
-                controller.status.isRunning ? controller.stop() : controller.start()
-            }
-            Button("Restart") { controller.restart() }
-            if let onRemove {
-                Divider()
-                Button("Remove", role: .destructive, action: onRemove)
-            }
+            ProcessActionItems(controller: controller,
+                               isHidden: isHidden,
+                               onToggleHidden: onToggleHidden,
+                               onRename: onRename,
+                               onResetName: onResetName,
+                               onRemove: onRemove)
         }
     }
 }
@@ -625,7 +618,8 @@ private struct NewCommandSheet: View {
     }
 }
 
-private struct RenameSheet: View {
+/// Shared by the sidebar and the grid, so a rename works the same in both.
+struct RenameSheet: View {
     let target: RenameTarget
     let onCommit: (String) -> Void
 

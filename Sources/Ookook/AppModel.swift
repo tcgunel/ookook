@@ -106,6 +106,16 @@ final class AppModel: ObservableObject {
         persistOpenProjects()
     }
 
+    /// Only processes added from the UI can be removed; the rest belong to an
+    /// ookook.yml and would come straight back on the next reload.
+    func isLocal(_ ref: ProcessRef) -> Bool {
+        project(id: ref.project)?.isLocal(process: ref.process) ?? false
+    }
+
+    func removeLocal(_ ref: ProcessRef) {
+        project(id: ref.project)?.removeLocal(process: ref.process)
+    }
+
     func project(id: String) -> Project? {
         projects.first { $0.id == id }
     }
