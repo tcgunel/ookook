@@ -76,6 +76,13 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     private var stopRequested = false
     private var restartWork: DispatchWorkItem?
     private var appearanceObserver: NSObjectProtocol?
+    /// Whether this process has run since the app launched.
+    ///
+    /// A terminal that only ever showed *restored* text must not be saved back:
+    /// each snapshot would capture the replay along with its own marker, and the
+    /// next launch would replay that, stacking "previous session" rules until
+    /// the tile was nothing but markers.
+    private var hasRunThisLaunch = false
 
     private static let maxRestartDelay: TimeInterval = 30
 
@@ -122,6 +129,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// worth keeping is the rendered screen, the same fallback the MCP output
     /// tool uses.
     func persistScrollback() {
+        guard hasRunThisLaunch else { return }
         let logged = log.tail(ScrollbackStore.maxLines)
         let meaningful = logged.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         if meaningful.count >= 3 {
@@ -187,6 +195,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     private var pendingManualRestart = false
 
     private func launch() {
+        hasRunThisLaunch = true
         // Run through the user's login shell so PATH, nvm, asdf, pyenv and
         // friends resolve exactly as they do in a normal terminal.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"

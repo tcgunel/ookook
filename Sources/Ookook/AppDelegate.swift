@@ -76,7 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The selected project's .claude folder is shown beside the user's own;
         // with nothing selected the project tabs are simply absent.
         let root = (app.selection?.project).flatMap { app.project(id: $0)?.rootURL }
-        SettingsWindowController.shared.show(projectRoot: root)
+        SettingsWindowController.shared.show(
+            projectRoot: root,
+            ssh: app.ssh,
+            projects: app.projects.map { (id: $0.id, name: $0.name) })
     }
 
     @objc private func toggleSound(_ sender: NSMenuItem) {

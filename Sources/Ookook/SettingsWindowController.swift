@@ -18,11 +18,17 @@ final class SettingsWindowController {
     /// - Parameter projectRoot: the project whose `.claude` folder is shown next
     ///   to the user's own. Pass the selected project's `rootURL`; nil hides the
     ///   project tabs rather than guessing.
-    func show(projectRoot: URL?) {
+    func show(projectRoot: URL?,
+              ssh: SSHConnectionStore,
+              projects: [(id: String, name: String)]) {
         store.setProjectRoot(projectRoot)
         store.reload()
 
+        let root = SettingsView(store: store, ssh: ssh, projects: projects)
         if let window {
+            // Rebuild the hosted view: which project is selected, and which
+            // projects exist at all, can both have changed since last time.
+            window.contentView = NSHostingView(rootView: root)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -35,7 +41,7 @@ final class SettingsWindowController {
             defer: false)
         window.title = "Settings"
         window.setFrameAutosaveName("OokookSettingsWindow")
-        window.contentView = NSHostingView(rootView: SettingsView(store: store))
+        window.contentView = NSHostingView(rootView: root)
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)

@@ -8,6 +8,9 @@ import SwiftUI
 /// what happened.
 struct SettingsView: View {
     @ObservedObject var store: ClaudeConfigStore
+    @ObservedObject var ssh: SSHConnectionStore
+    /// For scoping a connection to one project.
+    let projects: [(id: String, name: String)]
 
     var body: some View {
         TabView {
@@ -17,6 +20,8 @@ struct SettingsView: View {
                 .tabItem { Label("Agents", systemImage: "person.2") }
             MCPTab(store: store)
                 .tabItem { Label("MCP", systemImage: "server.rack") }
+            SSHSettingsView(store: ssh, projects: projects)
+                .tabItem { Label("SSH", systemImage: "network") }
             TerminalAppearanceTab()
                 .tabItem { Label("Terminal", systemImage: "terminal") }
             OokookPreferencesTab()

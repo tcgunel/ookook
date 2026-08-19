@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
     let git = GitMonitor()
     let layout = SidebarLayoutStore()
     let localProcesses = LocalProcessStore()
+    let ssh = SSHConnectionStore()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []

@@ -80,6 +80,7 @@ struct ContentView: View {
         List(selection: $app.selection) {
             ForEach(app.projects) { project in
                 ProjectSection(project: project,
+                               ssh: app.ssh,
                                resources: app.resources,
                                agents: app.agents,
                                git: app.git,
@@ -165,6 +166,7 @@ struct ContentView: View {
 /// projects into a sidebar without scrolling forever.
 private struct ProjectSection: View {
     @ObservedObject var project: Project
+    @ObservedObject var ssh: SSHConnectionStore
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
     @ObservedObject var git: GitMonitor
@@ -173,6 +175,12 @@ private struct ProjectSection: View {
 
     /// What the rename sheet is currently editing.
     @State private var renaming: RenameTarget?
+
+    private func openSSHSettings() {
+        SettingsWindowController.shared.show(projectRoot: project.rootURL,
+                                             ssh: ssh,
+                                             projects: [(id: project.id, name: project.name)])
+    }
     @State private var addingCommand = false
 
     var body: some View {
@@ -230,6 +238,19 @@ private struct ProjectSection: View {
                 Button("Add Claude Code") { project.add(.claudeAgent()) }
                 Button("Add Terminal") { project.add(.shell()) }
                 Button("Add Command…") { addingCommand = true }
+                Menu("New SSH Session") {
+                    let available = ssh.connections(for: project.id).filter(\.isUsable)
+                    if available.isEmpty {
+                        Button("No connections saved") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(available) { connection in
+                            Button(connection.displayName) { project.add(.ssh(connection)) }
+                        }
+                    }
+                    Divider()
+                    Button("Manage Connections…") { openSSHSettings() }
+                }
                 Divider()
                 Button("New Group…") {
                     let id = layout.createGroup(projectID: project.id,
