@@ -9,19 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false)
-        window.title = "Ookook"
-        window.setFrameAutosaveName("OokookMainWindow")
-        window.contentView = NSHostingView(rootView: ContentView(app: app))
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        self.window = window
-
-        NSApp.activate(ignoringOtherApps: true)
+        showMainWindow()
 
         // A path on the command line opens that project; otherwise pick up
         // wherever we were last, then fall back to the working directory.
@@ -42,7 +30,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.startServices()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window does not quit.
+    ///
+    /// The agents and dev servers keep running, which is the point of a
+    /// supervisor - losing a Claude session mid-task because the window was in
+    /// the way would be indefensible. The Dock icon (or ⌘0) brings it back, and
+    /// ⌘Q still quits properly, stopping everything.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { showMainWindow() }
+        return true
+    }
+
+    /// Builds the window on first use, and re-shows it after it was closed.
+    @objc func showMainWindow() {
+        if let window {
+            Self.moveOnScreenIfNeeded(window)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false)
+        window.title = "Ookook"
+        window.setFrameAutosaveName("OokookMainWindow")
+        window.contentView = NSHostingView(rootView: ContentView(app: app))
+        // Without this the window is deallocated on close and `window` above
+        // becomes a dangling reference - the app would sit there running with
+        // no window and no way to get one back.
+        window.isReleasedWhenClosed = false
+        window.center()
+        Self.moveOnScreenIfNeeded(window)
+        window.makeKeyAndOrderFront(nil)
+        self.window = window
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Rescues a window left on a display that is no longer attached.
+    ///
+    /// `setFrameAutosaveName` restores wherever the window was last, and if that
+    /// was a monitor you have since unplugged, the window is restored into empty
+    /// space: the app runs, the Dock icon is there, and nothing is visible. This
+    /// is why ⌘0 exists as well - so a window stranded while the app is already
+    /// running can be pulled back.
+    private static func moveOnScreenIfNeeded(_ window: NSWindow) {
+        let frame = window.frame
+        let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        guard !visible, let main = NSScreen.main else { return }
+        var recovered = frame
+        recovered.size.width = min(frame.width, main.visibleFrame.width)
+        recovered.size.height = min(frame.height, main.visibleFrame.height)
+        window.setFrame(recovered, display: false)
+        window.center()
+    }
 
     /// Never leave supervised children orphaned when the app goes away.
     func applicationWillTerminate(_ notification: Notification) {
@@ -121,6 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let projectItem = NSMenuItem()
         let projectMenu = NSMenu(title: "Project")
+        projectMenu.addItem(withTitle: "Ookook Window", action: #selector(showMainWindow), keyEquivalent: "0")
+        projectMenu.addItem(.separator())
         projectMenu.addItem(withTitle: "Open Project…", action: #selector(openProject(_:)), keyEquivalent: "o")
         projectMenu.addItem(withTitle: "Close Project", action: #selector(closeProject(_:)), keyEquivalent: "w")
         projectMenu.addItem(withTitle: "Reload Configs", action: #selector(reloadConfig(_:)), keyEquivalent: "r")

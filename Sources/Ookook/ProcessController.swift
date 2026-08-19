@@ -178,6 +178,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         // exactly the one whose last output you want to still be able to read.
         persistScrollback()
         terminalView.terminate()
+        settleAfterDeliberateTermination(relaunch: false)
     }
 
     func restart() {
@@ -186,10 +187,36 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             start()
             return
         }
-        // Relaunch from the termination callback rather than racing the kill.
         stopRequested = true
         pendingManualRestart = true
         terminalView.terminate()
+        settleAfterDeliberateTermination(relaunch: true)
+    }
+
+    /// Finishes a stop or restart that we asked for.
+    ///
+    /// SwiftTerm's `terminate()` calls `childStopped()`, which cancels the
+    /// child-exit DispatchSource that would otherwise have called
+    /// `processTerminated`. So for a termination *we* initiate the delegate
+    /// never fires: the process really is dead, but the UI keeps showing it as
+    /// running, and a restart would kill without ever relaunching. Settling it
+    /// here is the fix; `handleTermination` stays for the case that still
+    /// reports back - a process that exits on its own.
+    private func settleAfterDeliberateTermination(relaunch: Bool) {
+        guard stopRequested || pendingManualRestart else { return }
+        stopRequested = false
+        pendingManualRestart = false
+        status = .idle
+        guard relaunch else { return }
+        crashStreak = 0
+        // A beat for the old child to actually die: relaunching into the same
+        // view while the previous pty is still draining mixes the two.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.status.isRunning else { return }
+            self.launch()
+        }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     private var pendingManualRestart = false
@@ -342,6 +369,10 @@ extension ProcessController: LocalProcessTerminalViewDelegate {
 
     @MainActor
     private func handleTermination(exitCode: Int32?) {
+        // A termination for a process we have already settled is nothing to
+        // report - without this, a late callback after a manual stop would be
+        // read as a crash and could trigger a restart.
+        guard status.isRunning || pendingManualRestart else { return }
         let code = exitCode ?? -1
 
         if pendingManualRestart {
