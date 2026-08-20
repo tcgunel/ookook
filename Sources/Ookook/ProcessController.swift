@@ -108,6 +108,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
                 self.activity = self.terminalView.log.lastActivity
             }
         }
+        commandOverride = ResumeStore.command(for: ref)
         restoreScrollback()
     }
 
@@ -223,10 +224,15 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     /// Command used instead of `spec.command` from here on.
     ///
-    /// Kept for the controller's lifetime rather than a single launch: once you
-    /// have resumed a session, a crash-restart or a Restart click should land
-    /// you back in that same conversation, not silently start a fresh one.
-    private(set) var commandOverride: String?
+    /// Persisted, not just held for the controller's lifetime. Resuming a
+    /// conversation is a statement about which conversation this tile *is* -
+    /// a crash-restart, a Restart click, or quitting and reopening the app
+    /// should all land back in it, not silently start a fresh session. That
+    /// silent fresh start is the exact failure the resume feature exists to
+    /// fix, so it must not reappear one relaunch later.
+    private(set) var commandOverride: String? {
+        didSet { ResumeStore.set(commandOverride, for: ref) }
+    }
 
     /// Relaunches this process into an existing Claude Code conversation.
     func resume(_ session: ClaudeSessionSummary) {
@@ -236,6 +242,12 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         } else {
             start()
         }
+    }
+
+    /// Puts the keyboard into this terminal.
+    func focusTerminal() {
+        guard let window = terminalView.window else { return }
+        window.makeFirstResponder(terminalView)
     }
 
     /// Drops back to the command from `ookook.yml`.

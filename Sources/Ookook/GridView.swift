@@ -186,7 +186,7 @@ private struct GridTile: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            TerminalPane(controller: controller)
+            TerminalPane(controller: controller, onFocus: onSelect)
                 .frame(minHeight: 60)
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -197,9 +197,10 @@ private struct GridTile: View {
         )
         .frame(height: height)
         .overlay(alignment: .bottom) { resizeGrip }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: onFocus)
-        .onTapGesture(perform: onSelect)
+        // No tap gesture spans the tile. One covering the terminal eats the
+        // click before SwiftTerm sees it, which leaves the terminal unable to
+        // take keyboard focus - the tile looks alive but will not accept
+        // typing - and turns a double-click on a word into a view-mode switch.
         // The whole tile accepts a drop, but only the header starts a drag:
         // dragging from the terminal body would fight text selection in it.
         .dropDestination(for: DraggedProcess.self) { items, _ in
@@ -260,9 +261,17 @@ private struct GridTile: View {
         .padding(.vertical, 5)
         .background(Color(nsColor: .underPageBackgroundColor))
         .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            onFocus()
+            controller.focusTerminal()
+        }
+        .onTapGesture {
+            onSelect()
+            controller.focusTerminal()
+        }
         .processDraggable(controller.ref)
         .contextMenu { actions }
-        .help("Drag to reorder")
+        .help("Click to select, double-click to open full size, drag to reorder")
     }
 
     /// A grab strip along the bottom edge. Sized generously (8pt) because a

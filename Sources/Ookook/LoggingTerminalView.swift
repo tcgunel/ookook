@@ -11,6 +11,13 @@ final class LoggingTerminalView: LocalProcessTerminalView {
     /// Called on the main queue, coalesced, when new output has arrived.
     var onActivity: (() -> Void)?
 
+    /// Called when this terminal is clicked, so clicking into a tile selects
+    /// it. Selection has to follow the click rather than the click following
+    /// selection: a SwiftUI tap gesture big enough to select the tile would
+    /// have to cover the terminal, and then it swallows the click that gives
+    /// the terminal its keyboard focus.
+    var onBecomeFirstResponder: (() -> Void)?
+
     private var activityPending = false
 
     override func dataReceived(slice: ArraySlice<UInt8>) {

@@ -277,7 +277,11 @@ final class MCPServer: ObservableObject {
                 if let memory = app.resources.memoryByProcess[controller.ref.id], memory > 0 {
                     row += " memory=\(memory.formattedBytes)"
                 }
-                row += "\n    command: \(controller.spec.command)"
+                // The override, when there is one: reporting the config
+                // command would hide that this process is inside a resumed
+                // conversation, which is the one thing an agent reading this
+                // needs to know before restarting it.
+                row += "\n    command: \(controller.commandOverride ?? controller.spec.command)"
                 if let session = app.agents.sessions[controller.ref.id] {
                     row += "\n    agent: \(session.activity.label)"
                     if let summary = session.contextSummary {
