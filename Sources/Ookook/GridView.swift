@@ -38,6 +38,8 @@ struct GridView: View {
     /// Cross-project drops reorder the projects instead.
     let onMoveProject: (String, String) -> Void
     /// Removing a process is only offered for ones added from the UI.
+    /// Recent conversations per project, for the Resume submenu.
+    @ObservedObject var claudeSessions: ClaudeSessionStore
     let canRemove: (ProcessRef) -> Bool
     let onRemove: (ProcessRef) -> Void
 
@@ -99,6 +101,9 @@ struct GridView: View {
                                  if let draftHeight { tileHeight = draftHeight }
                                  draftHeight = nil
                              },
+                             sessions: controller.spec.kind == .agent
+                                 ? claudeSessions.sessions(for: controller.projectID)
+                                 : [],
                              label: layout.displayName(projectID: controller.projectID,
                                                        process: controller.spec.name),
                              isHidden: layout.isHidden(projectID: controller.projectID,
@@ -165,6 +170,7 @@ private struct GridTile: View {
     let height: Double
     let onResize: (Double) -> Void
     let onResizeEnd: () -> Void
+    let sessions: [ClaudeSessionSummary]
     let label: String
     let isHidden: Bool
     let onToggleHidden: () -> Void
@@ -309,7 +315,11 @@ private struct GridTile: View {
                            onToggleHidden: onToggleHidden,
                            onRename: onRename,
                            onResetName: onResetName,
-                           onRemove: onRemove)
+                           onRemove: onRemove,
+                           sessions: sessions,
+                           onResume: { controller.resume($0) },
+                           onClearResume: { controller.clearResume() },
+                           isResuming: controller.commandOverride != nil)
     }
 
     private var borderColor: Color {

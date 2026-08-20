@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     let layout = SidebarLayoutStore()
     let localProcesses = LocalProcessStore()
     let ssh = SSHConnectionStore()
+    let claudeSessions = ClaudeSessionStore()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
@@ -172,6 +173,7 @@ final class AppModel: ObservableObject {
 
     private func syncGitWatchList() {
         git.watch(projects.map { (id: $0.id, root: $0.rootURL) })
+        claudeSessions.refresh(projects: projects.map { (id: $0.id, root: $0.rootURL) })
     }
 
     /// Child `ObservableObject`s do not propagate through `@Published` arrays,
@@ -215,12 +217,29 @@ final class AppModel: ObservableObject {
         syncGitWatchList()
         git.start()
         startScrollbackSnapshots()
+        startSessionRefresh()
     }
 
     /// A SIGTERM - which is what `pkill`, a crash, or a forced logout sends -
     /// never runs `applicationWillTerminate`, so relying on quit alone loses
     /// everything. Snapshotting on a slow timer bounds that loss to one period.
     private var scrollbackTimer: Timer?
+
+    /// Transcripts change as agents work, so the Resume menu is rescanned on a
+    /// slow timer. Slow because it only ever matters when a menu is opened.
+    private var sessionTimer: Timer?
+
+    private func startSessionRefresh(interval: TimeInterval = 60) {
+        sessionTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.claudeSessions.refresh(projects: self.projects.map { (id: $0.id, root: $0.rootURL) })
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sessionTimer = timer
+    }
 
     private func startScrollbackSnapshots(interval: TimeInterval = 30) {
         scrollbackTimer?.invalidate()
@@ -239,6 +258,8 @@ final class AppModel: ObservableObject {
     func stopServices() {
         scrollbackTimer?.invalidate()
         scrollbackTimer = nil
+        sessionTimer?.invalidate()
+        sessionTimer = nil
         git.stop()
         agents.stop()
         resources.stop()

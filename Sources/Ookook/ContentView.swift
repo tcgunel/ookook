@@ -96,6 +96,7 @@ struct ContentView: View {
             ForEach(app.projects) { project in
                 ProjectSection(project: project,
                                ssh: app.ssh,
+                               claudeSessions: app.claudeSessions,
                                resources: app.resources,
                                agents: app.agents,
                                git: app.git,
@@ -162,6 +163,7 @@ struct ContentView: View {
                      layout: app.layout,
                      controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
                      onMoveProject: { app.moveProject($0, before: $1) },
+                     claudeSessions: app.claudeSessions,
                      canRemove: { app.isLocal($0) },
                      onRemove: { app.removeLocal($0) })
         } else if let controller = app.selectedController {
@@ -186,6 +188,7 @@ struct ContentView: View {
 private struct ProjectSection: View {
     @ObservedObject var project: Project
     @ObservedObject var ssh: SSHConnectionStore
+    @ObservedObject var claudeSessions: ClaudeSessionStore
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
     @ObservedObject var git: GitMonitor
@@ -217,6 +220,7 @@ private struct ProjectSection: View {
             }
             ForEach(layout.sections(projectID: project.id, controllers: project.controllers)) { section in
                 SidebarGroupView(project: project,
+                                 claudeSessions: claudeSessions,
                                  section: section,
                                  resources: resources,
                                  agents: agents,
@@ -296,6 +300,7 @@ private struct ProjectSection: View {
 /// layout, otherwise one of the agent/command/terminal kinds.
 private struct SidebarGroupView: View {
     @ObservedObject var project: Project
+    @ObservedObject var claudeSessions: ClaudeSessionStore
     let section: SidebarSection
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
@@ -308,6 +313,9 @@ private struct SidebarGroupView: View {
         DisclosureGroup(isExpanded: $expanded) {
             ForEach(section.controllers) { controller in
                 ProcessRow(controller: controller,
+                           sessions: controller.spec.kind == .agent
+                               ? claudeSessions.sessions(for: project.id)
+                               : [],
                            label: layout.displayName(projectID: project.id,
                                                      process: controller.spec.name),
                            memory: resources.memoryByProcess[controller.ref.id],
@@ -416,6 +424,7 @@ private struct GroupDropTarget: ViewModifier {
 
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
+    let sessions: [ClaudeSessionSummary]
     let label: String
     let memory: UInt64?
     let cpu: Double?
@@ -502,7 +511,11 @@ private struct ProcessRow: View {
                                onToggleHidden: onToggleHidden,
                                onRename: onRename,
                                onResetName: onResetName,
-                               onRemove: onRemove)
+                               onRemove: onRemove,
+                               sessions: sessions,
+                               onResume: { controller.resume($0) },
+                               onClearResume: { controller.clearResume() },
+                               isResuming: controller.commandOverride != nil)
         }
     }
 }

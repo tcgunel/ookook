@@ -15,6 +15,13 @@ struct ProcessActionItems: View {
     /// Present only for processes added from the UI; config-declared ones
     /// belong to ookook.yml and cannot be deleted from here.
     let onRemove: (() -> Void)?
+    /// Recent Claude Code conversations for this process's project. Empty for
+    /// anything that is not an agent, which is why the submenu is absent there
+    /// rather than present and disabled.
+    var sessions: [ClaudeSessionSummary] = []
+    var onResume: ((ClaudeSessionSummary) -> Void)?
+    var onClearResume: (() -> Void)?
+    var isResuming: Bool = false
 
     var body: some View {
         Button(isHidden ? "Show in Grid" : "Hide from Grid", action: onToggleHidden)
@@ -28,6 +35,17 @@ struct ProcessActionItems: View {
             controller.status.isRunning ? controller.stop() : controller.start()
         }
         Button("Restart") { controller.restart() }
+        if let onResume, !sessions.isEmpty {
+            Menu("Resume Session") {
+                ForEach(sessions) { session in
+                    Button(session.label) { onResume(session) }
+                }
+                if isResuming, let onClearResume {
+                    Divider()
+                    Button("Start Fresh Instead", action: onClearResume)
+                }
+            }
+        }
         if let onRemove {
             Divider()
             Button("Remove", role: .destructive, action: onRemove)

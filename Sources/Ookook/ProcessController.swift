@@ -221,14 +221,46 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     private var pendingManualRestart = false
 
+    /// Command used instead of `spec.command` from here on.
+    ///
+    /// Kept for the controller's lifetime rather than a single launch: once you
+    /// have resumed a session, a crash-restart or a Restart click should land
+    /// you back in that same conversation, not silently start a fresh one.
+    private(set) var commandOverride: String?
+
+    /// Relaunches this process into an existing Claude Code conversation.
+    func resume(_ session: ClaudeSessionSummary) {
+        commandOverride = session.command(base: spec.command)
+        if status.isRunning {
+            restart()
+        } else {
+            start()
+        }
+    }
+
+    /// Drops back to the command from `ookook.yml`.
+    func clearResume() {
+        commandOverride = nil
+        if status.isRunning { restart() }
+    }
+
     private func launch() {
         hasRunThisLaunch = true
         // Run through the user's login shell so PATH, nvm, asdf, pyenv and
         // friends resolve exactly as they do in a normal terminal.
+        //
+        // `-i` is not optional. A login shell sources .zprofile/.zlogin but
+        // *not* .zshrc, and .zshrc is where a Mac dev's PATH actually gets
+        // built - nvm, asdf, pyenv, ~/.local/bin. Without it the command dies
+        // with "command not found" and exit 127, which surfaces as a crash
+        // with status 32512 and looks like the program is broken rather than
+        // missing from PATH. It only shows up when the app is launched from
+        // the Dock or Finder, because launching it from a terminal inherits a
+        // PATH that already has everything.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         terminalView.startProcess(
             executable: shell,
-            args: ["-l", "-c", spec.command],
+            args: ["-i", "-l", "-c", commandOverride ?? spec.command],
             environment: childEnvironment(),
             execName: nil,
             currentDirectory: workingDirectory.path

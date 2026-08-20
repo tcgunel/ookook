@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let app = AppModel()
     private var window: NSWindow?
 
@@ -63,11 +63,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // becomes a dangling reference - the app would sit there running with
         // no window and no way to get one back.
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.center()
         Self.moveOnScreenIfNeeded(window)
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Asks before closing while work is running.
+    ///
+    /// Closing does not stop anything, but it does take a wall of live agents
+    /// off the screen, and the red button sits a few pixels from the sidebar -
+    /// it is far too easy to hit by accident for something you cannot undo by
+    /// pressing it again.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window else { return true }
+        let running = app.projects.flatMap(\.controllers).filter(\.status.isRunning).count
+        guard running > 0, !UserDefaults.standard.bool(forKey: "suppressCloseConfirmation") else {
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Close the Ookook window?"
+        alert.informativeText = running == 1
+            ? "1 process keeps running in the background. Reopen the window from the Dock icon or with ⌘0."
+            : "\(running) processes keep running in the background. Reopen the window from the Dock icon or with ⌘0."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Close Window")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+
+        let close = alert.runModal() == .alertFirstButtonReturn
+        if close, alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(true, forKey: "suppressCloseConfirmation")
+        }
+        return close
     }
 
     /// Rescues a window left on a display that is no longer attached.
