@@ -94,6 +94,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
         terminalView.processDelegate = self
+        terminalView.baseDirectory = workingDirectory
         TerminalAppearance.apply(to: terminalView)
         appearanceObserver = NotificationCenter.default.addObserver(
             forName: TerminalAppearance.changed, object: nil, queue: .main) { [weak self] _ in
@@ -403,7 +404,14 @@ extension ProcessController: LocalProcessTerminalViewDelegate {
         }
     }
 
-    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        guard let directory, !directory.isEmpty else { return }
+        Task { @MainActor in
+            // Keep Cmd-click resolving relative paths against wherever the
+            // shell actually is, not just where it started.
+            self.terminalView.baseDirectory = URL(fileURLWithPath: directory)
+        }
+    }
 
     nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
         Task { @MainActor in
