@@ -10,22 +10,32 @@ struct TerminalPane: NSViewRepresentable {
     /// Called when this terminal takes keyboard focus.
     var onFocus: (() -> Void)?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(controller: controller)
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> TerminalHostView {
+        let host = TerminalHostView()
+        update(host, context: context)
+        return host
     }
 
-    func makeNSView(context: Context) -> LoggingTerminalView {
-        let view = controller.terminalView
-        context.coordinator.attach(to: view)
-        view.onBecomeFirstResponder = onFocus
-        return view
+    func updateNSView(_ nsView: TerminalHostView, context: Context) {
+        update(nsView, context: context)
     }
 
-    func updateNSView(_ nsView: LoggingTerminalView, context: Context) {
+    private func update(_ host: TerminalHostView, context: Context) {
+        // Reloading a project builds fresh controllers, and with them fresh
+        // terminal views, while SwiftUI keeps this pane - same project, same
+        // process name, same identity - and so never calls makeNSView again.
+        // Hosting the terminal in a container instead of *being* it means the
+        // pane can swap in the current one; otherwise the tile keeps showing
+        // the dead terminal of the process that was just replaced, and the
+        // process that actually started is invisible.
+        host.host(controller.terminalView)
+        context.coordinator.attach(to: controller.terminalView, controller: controller)
         // The view outlives any one pane - the same terminal appears in the
         // grid and in single-pane - so the callback is refreshed rather than
         // set once.
-        nsView.onBecomeFirstResponder = onFocus
+        controller.terminalView.onBecomeFirstResponder = onFocus
     }
 
     /// Notices clicks into the terminal without consuming them.
@@ -37,14 +47,11 @@ struct TerminalPane: NSViewRepresentable {
     /// keep working, and we merely hear about it.
     @MainActor
     final class Coordinator: NSObject {
-        private let controller: ProcessController
+        private var controller: ProcessController?
         private weak var attached: LoggingTerminalView?
 
-        init(controller: ProcessController) {
+        func attach(to view: LoggingTerminalView, controller: ProcessController) {
             self.controller = controller
-        }
-
-        func attach(to view: LoggingTerminalView) {
             guard attached !== view else { return }
             attached = view
             let click = NSClickGestureRecognizer(target: self, action: #selector(clicked))
@@ -54,7 +61,27 @@ struct TerminalPane: NSViewRepresentable {
 
         @objc private func clicked() {
             attached?.onBecomeFirstResponder?()
-            controller.focusTerminal()
+            controller?.focusTerminal()
+        }
+    }
+}
+
+/// A plain container whose only job is to hold whichever terminal view is
+/// current, so the terminal can be replaced without replacing the pane.
+final class TerminalHostView: NSView {
+    private weak var hosted: LoggingTerminalView?
+
+    func host(_ view: LoggingTerminalView) {
+        guard hosted !== view else { return }
+        hosted?.removeFromSuperview()
+        hosted = view
+        view.frame = bounds
+        view.autoresizingMask = [.width, .height]
+        addSubview(view)
+        // A swap usually means the old process just died under the user's
+        // cursor; put the keyboard back where they were looking.
+        if window?.firstResponder == nil || window?.firstResponder === self {
+            window?.makeFirstResponder(view)
         }
     }
 }

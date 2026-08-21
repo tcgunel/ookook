@@ -34,11 +34,13 @@ final class Project: ObservableObject, Identifiable {
         load()
     }
 
-    /// Reads the config and builds controllers. Existing processes are stopped
-    /// first so a reload never leaks an orphaned child.
+    /// Reads the config and builds controllers.
+    ///
+    /// A process whose spec is unchanged keeps its controller, and so keeps
+    /// running: reloading is how you pick up an edit to `ookook.yml`, not a
+    /// reason to kill the agent you have been talking to for an hour. Only
+    /// processes that changed or disappeared are stopped.
     func load() {
-        stopAll()
-
         var config: ProjectConfig
         if FileManager.default.fileExists(atPath: configURL.path) {
             do {
@@ -47,6 +49,7 @@ final class Project: ObservableObject, Identifiable {
             } catch {
                 // A config that exists but does not parse is a real error worth
                 // showing; a folder with no config at all is not.
+                stopAll()
                 self.config = nil
                 self.controllers = []
                 self.loadError = error.localizedDescription
@@ -60,12 +63,29 @@ final class Project: ObservableObject, Identifiable {
 
         self.config = config
         let specs = config.processes + (localProcesses?.specs(for: id) ?? [])
+        let previous = controllers
+        var kept: [ObjectIdentifier: Bool] = [:]
+        var started: [ProcessController] = []
         self.controllers = specs.map { spec in
-            ProcessController(spec: spec,
-                              projectID: id,
-                              workingDirectory: config.workingDirectory(for: spec))
+            let directory = config.workingDirectory(for: spec)
+            if let existing = previous.first(where: {
+                $0.spec == spec && $0.workingDirectory == directory
+            }) {
+                kept[ObjectIdentifier(existing)] = true
+                return existing
+            }
+            let controller = ProcessController(spec: spec,
+                                               projectID: id,
+                                               workingDirectory: directory)
+            started.append(controller)
+            return controller
         }
-        for controller in controllers where controller.spec.startsAutomatically {
+        // Whatever the reload dropped or replaced has no tile any more, so it
+        // would otherwise keep running with nowhere to see it.
+        for controller in previous where kept[ObjectIdentifier(controller)] != true {
+            controller.stop()
+        }
+        for controller in started where controller.spec.startsAutomatically {
             controller.start()
         }
     }
