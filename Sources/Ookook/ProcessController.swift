@@ -109,7 +109,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
                 self.activity = self.terminalView.log.lastActivity
             }
         }
-        commandOverride = ResumeStore.command(for: ref)
+        resumeOffer = LastSessionStore.entry(for: ref)
         restoreScrollback()
     }
 
@@ -225,24 +225,47 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     /// Command used instead of `spec.command` from here on.
     ///
-    /// Persisted, not just held for the controller's lifetime. Resuming a
-    /// conversation is a statement about which conversation this tile *is* -
-    /// a crash-restart, a Restart click, or quitting and reopening the app
-    /// should all land back in it, not silently start a fresh session. That
-    /// silent fresh start is the exact failure the resume feature exists to
-    /// fix, so it must not reappear one relaunch later.
-    private(set) var commandOverride: String? {
-        didSet { ResumeStore.set(commandOverride, for: ref) }
-    }
+    /// Held for this launch only. Within a run it has to stick - a Restart
+    /// click or a crash-restart on a resumed tile belongs in the conversation
+    /// the user put it in, not in a fresh one - but reopening the app is a new
+    /// decision, which `resumeOffer` asks about rather than making for them.
+    private(set) var commandOverride: String?
+
+    /// The conversation this terminal was in when the app last closed, offered
+    /// until the user resumes it or waves it away.
+    @Published private(set) var resumeOffer: LastSessionStore.Entry?
 
     /// Relaunches this process into an existing Claude Code conversation.
     func resume(_ session: ClaudeSessionSummary) {
-        commandOverride = session.command(base: spec.command)
+        resume(sessionID: session.id, model: session.model)
+    }
+
+    /// Relaunches into a conversation known only by id - which is all the
+    /// previous-session offer has.
+    func resume(sessionID: String, model: String?) {
+        var parts = [spec.command, "--resume", sessionID]
+        if let model, !model.isEmpty { parts += ["--model", model] }
+        commandOverride = parts.joined(separator: " ")
+        resumeOffer = nil
         if status.isRunning {
             restart()
         } else {
             start()
         }
+    }
+
+    /// "No thanks" on the previous-session offer: this terminal is a fresh one.
+    func dismissResumeOffer() {
+        resumeOffer = nil
+        LastSessionStore.set(nil, for: ref)
+    }
+
+    /// Remembers the conversation this terminal is in, so the next launch can
+    /// offer it. Called on a timer and at quit, since a SIGTERM never reaches
+    /// `applicationWillTerminate`.
+    func rememberSession(_ session: AgentSession) {
+        guard spec.kind == .agent, !session.sessionID.isEmpty else { return }
+        LastSessionStore.record(sessionID: session.sessionID, model: session.model, for: ref)
     }
 
     /// Puts the keyboard into this terminal.
@@ -254,6 +277,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// Drops back to the command from `ookook.yml`.
     func clearResume() {
         commandOverride = nil
+        LastSessionStore.set(nil, for: ref)
         if status.isRunning { restart() }
     }
 

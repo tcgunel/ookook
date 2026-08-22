@@ -265,8 +265,20 @@ final class AppModel: ObservableObject {
         scrollbackTimer = timer
     }
 
+    /// Notes which conversation each agent is in, so the next launch can offer
+    /// to resume it. Rides along with the scrollback snapshot because the two
+    /// answer the same question - what was this terminal doing when we lost
+    /// it - and because that path already covers both the timer and quit.
+    func rememberSessions() {
+        for controller in projects.flatMap(\.controllers) {
+            guard let session = agents.sessions[controller.ref.id] else { continue }
+            controller.rememberSession(session)
+        }
+    }
+
     /// Called on quit, on a timer, and when a process stops.
     func persistScrollback() {
+        rememberSessions()
         projects.flatMap(\.controllers).forEach { $0.persistScrollback() }
     }
 

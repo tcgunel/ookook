@@ -169,8 +169,12 @@ struct ContentView: View {
                      canRemove: { app.isLocal($0) },
                      onRemove: { app.removeLocal($0) })
         } else if let controller = app.selectedController {
-            TerminalPane(controller: controller)
-                .id(controller.ref.id)
+            VStack(spacing: 0) {
+                ResumeOfferBar(controller: controller,
+                               sessions: app.claudeSessions.sessions(for: controller.projectID))
+                TerminalPane(controller: controller)
+            }
+            .id(controller.ref.id)
         } else if let error = app.projects.compactMap(\.loadError).first {
             ContentUnavailableMessage(
                 title: "Couldn't load ookook.yml",

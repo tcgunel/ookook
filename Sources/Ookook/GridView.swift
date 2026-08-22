@@ -186,6 +186,7 @@ private struct GridTile: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            ResumeOfferBar(controller: controller, sessions: sessions)
             TerminalPane(controller: controller, onFocus: onSelect)
                 .frame(minHeight: 60)
         }
