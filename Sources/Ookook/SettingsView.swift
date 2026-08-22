@@ -403,9 +403,18 @@ private struct OokookPreferencesTab: View {
     @AppStorage("gridColumns") private var gridColumns: Int = 0
     @AppStorage("notifySound") private var notifySound: Bool = true
     @AppStorage("notifyBanners") private var notifyBanners: Bool = true
+    @AppStorage(ClaudeLaunchOptions.skipPermissionsKey) private var skipPermissions: Bool = false
 
     var body: some View {
         Form {
+            Section("Claude Code") {
+                Toggle("Skip permission prompts (--dangerously-skip-permissions)",
+                       isOn: $skipPermissions)
+                Text("Agents run every tool call without asking - including writes, "
+                     + "deletes and shell commands. Applies to sessions started from now on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Layout") {
                 // ViewMode is not CaseIterable and lives in a file this window
                 // does not own, so the two cases are named here explicitly.

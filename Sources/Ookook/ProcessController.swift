@@ -271,9 +271,10 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         // the Dock or Finder, because launching it from a terminal inherits a
         // PATH that already has everything.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let command = ClaudeLaunchOptions.applied(to: commandOverride ?? spec.command)
         terminalView.startProcess(
             executable: shell,
-            args: ["-i", "-l", "-c", commandOverride ?? spec.command],
+            args: ["-i", "-l", "-c", command],
             environment: childEnvironment(),
             execName: nil,
             currentDirectory: workingDirectory.path
