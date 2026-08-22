@@ -107,6 +107,21 @@ final class AppModel: ObservableObject {
         persistOpenProjects()
     }
 
+    /// Moves a project one place up (-1) or down (1) in the sidebar.
+    func moveProject(_ id: String, by offset: Int) {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return }
+        let target = index + offset
+        guard projects.indices.contains(target) else { return }
+        projects.swapAt(index, target)
+        persistOpenProjects()
+    }
+
+    /// Where a project sits, so a menu can grey out the ends.
+    func projectPosition(_ id: String) -> (index: Int, count: Int)? {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return nil }
+        return (index, projects.count)
+    }
+
     /// Only processes added from the UI can be removed; the rest belong to an
     /// ookook.yml and would come straight back on the next reload.
     func isLocal(_ ref: ProcessRef) -> Bool {

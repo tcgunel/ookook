@@ -101,7 +101,9 @@ struct ContentView: View {
                                agents: app.agents,
                                git: app.git,
                                layout: app.layout,
-                               onClose: { app.close(project) })
+                               onClose: { app.close(project) },
+                               position: app.projectPosition(project.id),
+                               onMove: { app.moveProject(project.id, by: $0) })
             }
         }
         .listStyle(.sidebar)
@@ -194,9 +196,20 @@ private struct ProjectSection: View {
     @ObservedObject var git: GitMonitor
     @ObservedObject var layout: SidebarLayoutStore
     let onClose: () -> Void
+    /// Sidebar order. Projects are a flat list the user arranges by hand, so
+    /// moving one is a project-level command, not something a process drag can
+    /// express.
+    let position: (index: Int, count: Int)?
+    let onMove: (Int) -> Void
 
     /// What the rename sheet is currently editing.
     @State private var renaming: RenameTarget?
+
+    private func canMoveProject(by offset: Int) -> Bool {
+        guard let position else { return false }
+        let target = position.index + offset
+        return target >= 0 && target < position.count
+    }
 
     private func openSSHSettings() {
         SettingsWindowController.shared.show(projectRoot: project.rootURL,
@@ -282,6 +295,11 @@ private struct ProjectSection: View {
                     renaming = .group(project: project.id, id: id, current: "New Group")
                 }
                 Button("Reset Sidebar Layout") { layout.resetLayout(projectID: project.id) }
+                Divider()
+                Button("Move Project Up") { onMove(-1) }
+                    .disabled(!canMoveProject(by: -1))
+                Button("Move Project Down") { onMove(1) }
+                    .disabled(!canMoveProject(by: 1))
                 Divider()
                 Button("Reload Config") { project.load() }
                 Button("Start All in \(project.name)") { project.startAll() }
