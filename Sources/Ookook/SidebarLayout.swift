@@ -215,6 +215,42 @@ final class SidebarLayoutStore: ObservableObject {
         update(projectID) { $0.groups.move(fromOffsets: source, toOffset: destination) }
     }
 
+    /// Moves one group up (-1) or down (1) in the sidebar.
+    func moveGroup(projectID: String, id: UUID, by offset: Int) {
+        update(projectID) { layout in
+            guard let index = layout.groups.firstIndex(where: { $0.id == id }) else { return }
+            let target = index + offset
+            guard layout.groups.indices.contains(target) else { return }
+            layout.groups.swapAt(index, target)
+        }
+    }
+
+    /// Where a group sits, and whether it can move further.
+    func groupPosition(projectID: String, id: UUID) -> (index: Int, count: Int)? {
+        let groups = layout(for: projectID).groups
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return nil }
+        return (index, groups.count)
+    }
+
+    /// The id of the group a section stands for, creating a real layout first
+    /// if the section is still one of the derived kind ones.
+    ///
+    /// Kind sections are computed from each process's type and have no
+    /// identity, so renaming or deleting one is meaningless until the project
+    /// has a layout of its own. Rather than making the user find "Customise
+    /// Groups" before the commands they actually wanted, adopt the layout on
+    /// their behalf - what they are looking at does not change - and return
+    /// the group that now stands for the section they clicked.
+    func materialisedGroupID(for section: SidebarSection,
+                             projectID: String,
+                             controllers: [ProcessController]) -> UUID? {
+        if let id = section.groupID { return id }
+        adoptKindLayout(projectID: projectID, controllers: controllers)
+        return layout(for: projectID).groups.first {
+            $0.name.caseInsensitiveCompare(section.title) == .orderedSame
+        }?.id
+    }
+
     /// Moves a process into `groupID`, optionally landing it just above
     /// `before`. This only ever rewrites the layout - it never touches
     /// `Project.load()`, which stops and rebuilds every process, so a drag

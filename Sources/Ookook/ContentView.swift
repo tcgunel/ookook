@@ -371,21 +371,59 @@ private struct SidebarGroupView: View {
         .contentShape(Rectangle())
         .modifier(GroupDropTarget(groupID: section.groupID, projectID: project.id, drop: drop))
         .contextMenu {
-            if let groupID = section.groupID {
-                Button("Rename Group…") {
-                    onRename(.group(project: project.id, id: groupID, current: section.title.capitalized))
-                }
-                Button("Delete Group") {
-                    layout.deleteGroup(projectID: project.id, id: groupID)
-                }
-            } else {
-                // Kind sections are derived, not stored; there is nothing to
-                // rename until the project has a layout of its own.
-                Button("Customise Groups") {
-                    layout.adoptKindLayout(projectID: project.id, controllers: project.controllers)
-                }
+            // Every command here works on a derived kind section too: asking
+            // for one adopts the layout first, so "Delete Group" is never
+            // mysteriously absent on the groups a new project starts with.
+            Button("Rename Group…") {
+                guard let groupID = materialisedGroupID() else { return }
+                onRename(.group(project: project.id,
+                                id: groupID,
+                                current: section.title.capitalized))
+            }
+            Button("Move Up") { move(by: -1) }
+                .disabled(!canMove(by: -1))
+            Button("Move Down") { move(by: 1) }
+                .disabled(!canMove(by: 1))
+            Divider()
+            Button("New Group…") {
+                let id = layout.createGroup(projectID: project.id,
+                                            named: "New Group",
+                                            controllers: project.controllers)
+                onRename(.group(project: project.id, id: id, current: "New Group"))
+            }
+            Button("Delete Group", role: .destructive) {
+                guard let groupID = materialisedGroupID() else { return }
+                layout.deleteGroup(projectID: project.id, id: groupID)
+            }
+            Divider()
+            Button("Reset Sidebar Layout") {
+                layout.resetLayout(projectID: project.id)
             }
         }
+    }
+
+    /// The group this section stands for, creating one if the section is still
+    /// derived from process kinds.
+    private func materialisedGroupID() -> UUID? {
+        layout.materialisedGroupID(for: section,
+                                   projectID: project.id,
+                                   controllers: project.controllers)
+    }
+
+    private func move(by offset: Int) {
+        guard let groupID = materialisedGroupID() else { return }
+        layout.moveGroup(projectID: project.id, id: groupID, by: offset)
+    }
+
+    /// Only meaningful once the layout is real; a lone derived section has
+    /// nowhere to move to either way, so the answer is the same.
+    private func canMove(by offset: Int) -> Bool {
+        guard let groupID = section.groupID,
+              let position = layout.groupPosition(projectID: project.id, id: groupID)
+        else { return layout.isCustom(projectID: project.id) ? false : true }
+        return position.count > 1
+            && position.index + offset >= 0
+            && position.index + offset < position.count
     }
 
     private func drop(_ ref: ProcessRef, _ placement: DropPlacement) {
