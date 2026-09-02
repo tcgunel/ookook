@@ -35,15 +35,16 @@ struct MCPStatusBar: View {
                         .foregroundStyle(.secondary)
                         .help("Total memory used by all running processes")
                 }
-                if mcp.connectCommand != nil {
-                    Button {
-                        copyConnectCommand()
+                if mcp.claudeConnectCommand != nil {
+                    Menu {
+                        Button("Copy Claude Code command") { copy(mcp.claudeConnectCommand) }
+                        Button("Copy Codex command") { copy(mcp.codexConnectCommand) }
                     } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 10))
                     }
-                    .buttonStyle(.borderless)
-                    .help("Copy the `claude mcp add` command")
+                    .menuStyle(.borderlessButton)
+                    .help("Copy an MCP connection command")
                 }
             }
             .padding(.horizontal, 10)
@@ -58,8 +59,8 @@ struct MCPStatusBar: View {
         return "MCP off"
     }
 
-    private func copyConnectCommand() {
-        guard let command = mcp.connectCommand else { return }
+    private func copy(_ command: String?) {
+        guard let command else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
         copied = true

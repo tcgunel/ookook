@@ -46,6 +46,11 @@ processes:
     command: claude
     autostart: false
 
+  - name: codex
+    command: codex
+    type: agent
+    autostart: false
+
   - name: api
     command: php artisan serve
     cwd: ./backend         # relative to this file, or absolute

@@ -53,7 +53,10 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     nonisolated var id: String { ref.id }
     nonisolated var ref: ProcessRef { ProcessRef(project: projectID, process: spec.name) }
 
-    let terminalView: LoggingTerminalView
+    /// Replaced on every relaunch, so no process ever runs on a `LocalProcess`
+    /// that has been terminated. Published so the pane hosting it swaps to the
+    /// new one rather than going on showing a terminal nothing is attached to.
+    @Published private(set) var terminalView: LoggingTerminalView
 
     /// Last line of output with visible content, shown under the name in the sidebar.
     @Published private(set) var activity: String?
@@ -93,9 +96,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         self.terminalView = LoggingTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480))
         super.init()
-        terminalView.processDelegate = self
-        terminalView.baseDirectory = workingDirectory
-        TerminalAppearance.apply(to: terminalView)
+        configure(terminalView)
         appearanceObserver = NotificationCenter.default.addObserver(
             forName: TerminalAppearance.changed, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -103,14 +104,57 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
                     TerminalAppearance.apply(to: self.terminalView)
                 }
             }
-        terminalView.onActivity = { [weak self] in
+        resumeOffer = LastSessionStore.entry(for: ref)
+        restoreScrollback()
+    }
+
+    /// Wires a terminal view up to this controller. Applied to the first one
+    /// and to every replacement, so a relaunched process is indistinguishable
+    /// from a freshly created one.
+    private func configure(_ view: LoggingTerminalView) {
+        view.processDelegate = self
+        view.baseDirectory = workingDirectory
+        TerminalAppearance.apply(to: view)
+        view.onActivity = { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.activity = self.terminalView.log.lastActivity
             }
         }
-        resumeOffer = LastSessionStore.entry(for: ref)
-        restoreScrollback()
+    }
+
+    /// Whether the current view's process has already been started once.
+    ///
+    /// SwiftTerm's `LocalProcess` is not reusable after `terminate()`: closing
+    /// the pty leaves callbacks in flight that clear `running` and the write
+    /// descriptor *again*, moments after the replacement child is up. The new
+    /// process then reads and paints perfectly while `send` discards every
+    /// byte, because it opens with a `running` guard and returns in silence.
+    /// That is a terminal you can watch but never talk to, and no number of
+    /// retries escapes it - the second launch wedges exactly like the first.
+    ///
+    /// So a view is used for one process only. Replacing it costs the live
+    /// scrollback, which is why the text on screen is carried across.
+    private var viewHasLaunched = false
+
+    /// Swaps in a terminal whose process has never been terminated.
+    private func replaceTerminalViewIfUsed() {
+        guard viewHasLaunched else { return }
+        let previous = terminalView
+        let replacement = LoggingTerminalView(frame: previous.frame)
+        configure(replacement)
+        // Carry the callbacks the panes installed, so the tile hosting this
+        // controller keeps selecting and focusing as it did before.
+        replacement.onBecomeFirstResponder = previous.onBecomeFirstResponder
+        // And carry what was on screen: a restart is not a reason for the
+        // history above it to vanish.
+        let history = screenText(lines: ScrollbackStore.maxLines)
+        if !history.isEmpty {
+            replacement.feed(text: "\u{1B}[2m\(history.joined(separator: "\r\n"))\r\n"
+                             + "── restarted ──\u{1B}[0m\r\n")
+        }
+        terminalView = replacement
+        previous.terminate()
     }
 
     /// Replays the previous session's output into the fresh terminal, so a tile
@@ -166,6 +210,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         cancelPendingRestart()
         stopRequested = false
         crashStreak = 0
+        wedgeRecoveries = 0
         launch()
     }
 
@@ -211,8 +256,9 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         status = .idle
         guard relaunch else { return }
         crashStreak = 0
-        // A beat for the old child to actually die: relaunching into the same
-        // view while the previous pty is still draining mixes the two.
+        // A beat for the old child to actually die. The new process no longer
+        // shares a terminal with it - `launch` swaps in a fresh one - so this
+        // is now only about not tearing down and forking in the same instant.
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.status.isRunning else { return }
             self.launch()
@@ -236,14 +282,21 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     @Published private(set) var resumeOffer: LastSessionStore.Entry?
 
     /// Relaunches this process into an existing Claude Code conversation.
-    func resume(_ session: ClaudeSessionSummary) {
-        resume(sessionID: session.id, model: session.model)
+    func resume(_ session: AgentSessionSummary) {
+        commandOverride = session.command(base: spec.command)
+        resumeOffer = nil
+        if status.isRunning { restart() } else { start() }
+        takeKeyboard()
     }
 
     /// Relaunches into a conversation known only by id - which is all the
     /// previous-session offer has.
     func resume(sessionID: String, model: String?) {
-        var parts = [spec.command, "--resume", sessionID]
+        var parts: [String]
+        switch spec.agentProvider {
+        case .codex: parts = [spec.command, "resume", sessionID]
+        default: parts = [spec.command, "--resume", sessionID]
+        }
         if let model, !model.isEmpty { parts += ["--model", model] }
         commandOverride = parts.joined(separator: " ")
         resumeOffer = nil
@@ -251,6 +304,22 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             restart()
         } else {
             start()
+        }
+        takeKeyboard()
+    }
+
+    /// Puts the keyboard into this terminal after the click that started it.
+    ///
+    /// Resuming is a button press, so the button - not the terminal - is what
+    /// holds focus when the session comes back. The user's next act is always
+    /// to type into the conversation they just restored, and a terminal that
+    /// is visibly alive but silently unfocused reads as one that has stopped
+    /// accepting the keyboard entirely. Deferred a turn so it lands after the
+    /// SwiftUI update the resume itself triggers, which would otherwise take
+    /// first responder straight back.
+    private func takeKeyboard() {
+        DispatchQueue.main.async { [weak self] in
+            self?.focusTerminal()
         }
     }
 
@@ -268,6 +337,28 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         LastSessionStore.record(sessionID: session.sessionID, model: session.model, for: ref)
     }
 
+    /// Records a transcript discovered directly on disk. Codex does not keep
+    /// Claude's per-PID session-state files, so its current conversation is
+    /// identified from its most recently updated rollout instead.
+    func rememberSession(_ session: AgentSessionSummary) {
+        guard spec.kind == .agent, !session.id.isEmpty else { return }
+        LastSessionStore.record(sessionID: session.id, model: session.model, for: ref)
+    }
+
+    /// True when the child is alive and still painting, but nothing typed at
+    /// it can ever arrive.
+    ///
+    /// SwiftTerm marks its side of the pty stopped when a read comes back
+    /// empty, which clears the descriptor writes go to - but the read loop
+    /// re-arms itself without consulting that flag, so output carries on. The
+    /// result is a terminal that looks completely healthy and silently drops
+    /// every keystroke, because `LocalProcess.send` returns early and says
+    /// nothing. Restarting the process relaunches it into the same
+    /// conversation, so the wedge is recoverable once it is visible at all.
+    var isInputWedged: Bool {
+        status.isRunning && !terminalView.process.running
+    }
+
     /// Puts the keyboard into this terminal.
     func focusTerminal() {
         guard let window = terminalView.window else { return }
@@ -283,6 +374,8 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
 
     private func launch() {
         hasRunThisLaunch = true
+        replaceTerminalViewIfUsed()
+        viewHasLaunched = true
         // Run through the user's login shell so PATH, nvm, asdf, pyenv and
         // friends resolve exactly as they do in a normal terminal.
         //
@@ -304,6 +397,66 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             currentDirectory: workingDirectory.path
         )
         status = .running
+        syncWindowSize()
+        watchForStartupWedge()
+    }
+
+    /// Relaunches a process that came up with no way to type into it.
+    ///
+    /// The wedge is set at birth: a read on the pty master can come back empty
+    /// in the instant between `forkpty` and the child opening the slave, and
+    /// SwiftTerm reads that as end-of-file for good - so the terminal spends
+    /// its whole life printing normally and discarding every keystroke. It is
+    /// a race, so the same command usually starts fine the second time.
+    ///
+    /// Caught this early it costs nothing: a second in, the agent has printed
+    /// a banner and done no work, and the relaunch carries the same resume
+    /// command, so it lands back in the same conversation. A wedge that shows
+    /// up later is left alone deliberately - by then the process may be deep
+    /// in a task, and killing real work to restore the keyboard is a trade
+    /// only the user can make, which is what the badge on the tile is for.
+    private func watchForStartupWedge() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.status.isRunning, self.isInputWedged else { return }
+            // Bounded: if relaunching cannot escape it, the cause is not the
+            // race and retrying forever would only churn the conversation.
+            guard self.wedgeRecoveries < Self.maxWedgeRecoveries else { return }
+            self.wedgeRecoveries += 1
+            self.restart()
+        }
+    }
+
+    /// Relaunches spent escaping a startup wedge, reset by a deliberate start.
+    private var wedgeRecoveries = 0
+    private static let maxWedgeRecoveries = 3
+
+    /// Tells the new child how big its terminal actually is.
+    ///
+    /// SwiftTerm only forwards a resize to the pty while a process is running,
+    /// so every resize a terminal saw while it was stopped was dropped on the
+    /// floor - and a terminal is stopped for its whole life until the moment
+    /// someone starts or resumes it. The size the child inherits is whatever
+    /// the view last computed, which for a tile the layout has not reached yet
+    /// is still the placeholder frame from `init`. A full-screen TUI then
+    /// paints itself for a terminal of the wrong shape and draws half off the
+    /// edge of the tile, and nothing corrects it until the window is resized
+    /// by hand.
+    ///
+    /// Deferred a turn so the tile has been laid out before the size is read.
+    private func syncWindowSize() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.status.isRunning else { return }
+            self.terminalView.layoutSubtreeIfNeeded()
+            let terminal = self.terminalView.getTerminal()
+            // A tile that has not been laid out yet reports nothing, and
+            // telling the child its terminal is 0x0 is worse than telling it
+            // nothing at all - it leaves the pty with no screen to draw on
+            // until something else happens to resize it. Wait for a real size.
+            guard terminal.cols > 0, terminal.rows > 0 else { return }
+            self.terminalView.sizeChanged(source: self.terminalView,
+                                          newCols: terminal.cols,
+                                          newRows: terminal.rows)
+        }
     }
 
     /// SwiftTerm's default environment is a minimal synthetic one, which would

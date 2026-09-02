@@ -168,6 +168,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sender.state = Notifier.shared.bannersEnabled ? .on : .off
     }
 
+    @objc private func selectPreviousTerminal(_ sender: Any?) { app.selectAdjacent(by: -1) }
+    @objc private func selectNextTerminal(_ sender: Any?) { app.selectAdjacent(by: 1) }
+    @objc private func selectTerminalAbove(_ sender: Any?) { app.selectVertically(-1) }
+    @objc private func selectTerminalBelow(_ sender: Any?) { app.selectVertically(1) }
+
     @objc private func reloadConfig(_ sender: Any?) { app.reloadAll() }
     @objc private func startAll(_ sender: Any?) { app.startAll() }
     @objc private func stopAll(_ sender: Any?) { app.stopAll() }
@@ -208,6 +213,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for item in projectMenu.items where item.action != nil { item.target = self }
         projectItem.submenu = projectMenu
         mainMenu.addItem(projectItem)
+
+        // Moving between terminals from the keyboard.
+        //
+        // ⌘ plus an arrow rather than a modifier nobody presses by accident:
+        // travelling the wall of agents is a thing you do constantly, and it
+        // has to cost one hand. The trade is that ⌘← and ⌘→ no longer jump to
+        // the ends of a line inside text fields, which in an app that is
+        // almost entirely terminals is a fair price.
+        let goItem = NSMenuItem()
+        let goMenu = NSMenu(title: "Go")
+        let directions: [(String, Selector, Int)] = [
+            ("Previous Terminal", #selector(selectPreviousTerminal(_:)), NSLeftArrowFunctionKey),
+            ("Next Terminal", #selector(selectNextTerminal(_:)), NSRightArrowFunctionKey),
+            ("Terminal Above", #selector(selectTerminalAbove(_:)), NSUpArrowFunctionKey),
+            ("Terminal Below", #selector(selectTerminalBelow(_:)), NSDownArrowFunctionKey),
+        ]
+        for (title, action, key) in directions {
+            guard let scalar = UnicodeScalar(key) else { continue }
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: String(scalar))
+            item.keyEquivalentModifierMask = [.command]
+            item.target = self
+            goMenu.addItem(item)
+        }
+        goItem.submenu = goMenu
+        mainMenu.addItem(goItem)
 
         let alertsItem = NSMenuItem()
         let alertsMenu = NSMenu(title: "Alerts")

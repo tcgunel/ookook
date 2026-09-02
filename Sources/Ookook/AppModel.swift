@@ -14,7 +14,7 @@ final class AppModel: ObservableObject {
     let layout = SidebarLayoutStore()
     let localProcesses = LocalProcessStore()
     let ssh = SSHConnectionStore()
-    let claudeSessions = ClaudeSessionStore()
+    let agentSessions = AgentSessionStore()
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
@@ -92,6 +92,50 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Moving between terminals
+
+    /// How many columns the grid is showing, reported by it after each layout.
+    ///
+    /// Not `@Published`: it is read when a shortcut fires, never rendered, and
+    /// publishing it would repaint every tile each time the window is resized.
+    var gridColumnCount: Int = 1
+
+    /// Moves the selection `offset` tiles along the order the grid and the
+    /// sidebar share, and puts the keyboard into whatever it lands on.
+    ///
+    /// Clamped rather than wrapped. The tiles are a wall you navigate by
+    /// position, and jumping from the last one back to the first loses the
+    /// place you were keeping far more often than it saves a keystroke.
+    func selectAdjacent(by offset: Int) {
+        let ordered = visibleControllers
+        guard !ordered.isEmpty else { return }
+        guard let current = selection.flatMap({ ref in ordered.firstIndex { $0.ref == ref } }) else {
+            focus(ordered[0])
+            return
+        }
+        let target = min(max(0, current + offset), ordered.count - 1)
+        guard target != current else { return }
+        focus(ordered[target])
+    }
+
+    /// One step up or down: a whole grid row in grid mode, the next terminal
+    /// in single-pane, where there is only ever one column.
+    func selectVertically(_ direction: Int) {
+        let isGrid = UserDefaults.standard.string(forKey: "viewMode") == ViewMode.grid.rawValue
+        selectAdjacent(by: direction * (isGrid ? max(1, gridColumnCount) : 1))
+    }
+
+    /// Selects a terminal and hands it the keyboard.
+    ///
+    /// The focus is deferred a turn because in single-pane the terminal being
+    /// selected is not in the window yet - SwiftUI swaps the pane in response
+    /// to this very change, and a view with no window cannot become first
+    /// responder.
+    private func focus(_ controller: ProcessController) {
+        selection = controller.ref
+        DispatchQueue.main.async { controller.focusTerminal() }
+    }
+
     /// Reorders whole projects. A grid mixes tiles from every open project, so
     /// a drag between two of them cannot mean "reorder within a project" -
     /// there is no shared list to reorder. Moving the source project's block to
@@ -128,8 +172,18 @@ final class AppModel: ObservableObject {
         project(id: ref.project)?.isLocal(process: ref.process) ?? false
     }
 
+    func canRemove(_ ref: ProcessRef) -> Bool {
+        project(id: ref.project)?.canRemove(process: ref.process) ?? false
+    }
+
+    func remove(_ ref: ProcessRef) {
+        project(id: ref.project)?.remove(process: ref.process)
+        layout.forget(projectID: ref.project, process: ref.process)
+    }
+
     func removeLocal(_ ref: ProcessRef) {
         project(id: ref.project)?.removeLocal(process: ref.process)
+        layout.forget(projectID: ref.project, process: ref.process)
     }
 
     func project(id: String) -> Project? {
@@ -188,7 +242,7 @@ final class AppModel: ObservableObject {
 
     private func syncGitWatchList() {
         git.watch(projects.map { (id: $0.id, root: $0.rootURL) })
-        claudeSessions.refresh(projects: projects.map { (id: $0.id, root: $0.rootURL) })
+        agentSessions.refresh(projects: projects.map { (id: $0.id, root: $0.rootURL) })
     }
 
     /// Child `ObservableObject`s do not propagate through `@Published` arrays,
@@ -249,7 +303,7 @@ final class AppModel: ObservableObject {
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.claudeSessions.refresh(projects: self.projects.map { (id: $0.id, root: $0.rootURL) })
+                self.agentSessions.refresh(projects: self.projects.map { (id: $0.id, root: $0.rootURL) })
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -271,8 +325,19 @@ final class AppModel: ObservableObject {
     /// it - and because that path already covers both the timer and quit.
     func rememberSessions() {
         for controller in projects.flatMap(\.controllers) {
-            guard let session = agents.sessions[controller.ref.id] else { continue }
-            controller.rememberSession(session)
+            if let session = agents.sessions[controller.ref.id] {
+                controller.rememberSession(session)
+                continue
+            }
+            // Codex records its rollout on disk but has no per-PID state file
+            // like Claude's ~/.claude/sessions/<pid>.json. The session store
+            // is refreshed regularly while the app runs, so its newest entry
+            // is the right resume target for this live Codex process.
+            if controller.status.isRunning,
+               controller.spec.agentProvider == .codex,
+               let session = agentSessions.sessions(for: controller.projectID, provider: .codex).first {
+                controller.rememberSession(session)
+            }
         }
     }
 

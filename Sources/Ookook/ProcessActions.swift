@@ -12,14 +12,17 @@ struct ProcessActionItems: View {
     let onRename: () -> Void
     /// Present only when the process is showing a user-given name.
     let onResetName: (() -> Void)?
-    /// Present only for processes added from the UI; config-declared ones
-    /// belong to ookook.yml and cannot be deleted from here.
+    /// Absent only when there is nothing safe to remove - the last process a
+    /// config declares, since an empty `processes` list does not load.
     let onRemove: (() -> Void)?
+    /// True when removing edits ookook.yml rather than this Mac's own list, so
+    /// the menu can say which file is about to change.
+    var removeEditsConfig: Bool = false
     /// Recent Claude Code conversations for this process's project. Empty for
     /// anything that is not an agent, which is why the submenu is absent there
     /// rather than present and disabled.
-    var sessions: [ClaudeSessionSummary] = []
-    var onResume: ((ClaudeSessionSummary) -> Void)?
+    var sessions: [AgentSessionSummary] = []
+    var onResume: ((AgentSessionSummary) -> Void)?
     var onClearResume: (() -> Void)?
     var isResuming: Bool = false
 
@@ -48,7 +51,8 @@ struct ProcessActionItems: View {
         }
         if let onRemove {
             Divider()
-            Button("Remove", role: .destructive, action: onRemove)
+            Button(removeEditsConfig ? "Remove from ookook.yml" : "Remove",
+                   role: .destructive, action: onRemove)
         }
     }
 }

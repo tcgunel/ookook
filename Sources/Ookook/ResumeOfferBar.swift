@@ -9,7 +9,7 @@ struct ResumeOfferBar: View {
     @ObservedObject var controller: ProcessController
     /// Recent conversations for this project, used to put a human label on the
     /// remembered id. Absent labels are not a problem; the id still resumes.
-    let sessions: [ClaudeSessionSummary]
+    let sessions: [AgentSessionSummary]
 
     var body: some View {
         if let offer = controller.resumeOffer {

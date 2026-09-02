@@ -77,6 +77,18 @@ extension ProcessSpec {
                     env: nil)
     }
 
+    /// A fresh OpenAI Codex session in the project directory.
+    static func codexAgent(named name: String = "Codex") -> ProcessSpec {
+        ProcessSpec(name: name,
+                    command: "codex",
+                    cwd: nil,
+                    autostart: true,
+                    autorestart: false,
+                    type: .agent,
+                    port: nil,
+                    env: nil)
+    }
+
     /// An interactive login shell. `-i` matters: without it the shell exits
     /// immediately even on a pty.
     static func shell(named name: String = "shell") -> ProcessSpec {

@@ -39,8 +39,11 @@ struct GridView: View {
     let onMoveProject: (String, String) -> Void
     /// Removing a process is only offered for ones added from the UI.
     /// Recent conversations per project, for the Resume submenu.
-    @ObservedObject var claudeSessions: ClaudeSessionStore
+    @ObservedObject var agentSessions: AgentSessionStore
     let canRemove: (ProcessRef) -> Bool
+    /// Whether the process was added from the UI, so the menu can say when
+    /// removing one will edit ookook.yml instead.
+    let isLocal: (ProcessRef) -> Bool
     let onRemove: (ProcessRef) -> Void
 
     /// The tile whose name is being edited. The sheet lives here rather than on
@@ -70,11 +73,57 @@ struct GridView: View {
         return min(max(available / rows, minTileHeight), maxTileHeight)
     }
 
-    private var columns: [GridItem] {
-        if columnCount > 0 {
-            return Array(repeating: GridItem(.flexible(), spacing: Self.spacing), count: columnCount)
+    /// How many columns the grid is laid out in right now.
+    ///
+    /// The adaptive case mirrors `fittingHeight`'s arithmetic rather than
+    /// letting `LazyVGrid` decide, because a tile may now span more than one
+    /// column and rows have to be packed by hand for that to work at all.
+    private func columns(for width: Double) -> Int {
+        Self.columnCount(for: width, preferred: columnCount)
+    }
+
+    /// The same arithmetic, reachable without a grid to ask.
+    ///
+    /// ⌘↑/⌘↓ move a row rather than a tile, and a row is only as wide as the
+    /// grid happens to be laid out right now - so the keyboard shortcut needs
+    /// the same answer the layout uses, from outside the view.
+    static func columnCount(for width: Double, preferred: Int) -> Int {
+        if preferred > 0 { return preferred }
+        guard width > 0 else { return 1 }
+        return max(1, Int((width - padding * 2 + spacing) / (minTileWidth + spacing)))
+    }
+
+    /// Width of one column, and so of a tile spanning one.
+    private func cellWidth(for width: Double, columns: Int) -> Double {
+        let available = width - Self.padding * 2 - Self.spacing * Double(columns - 1)
+        return max(Self.minTileWidth / 2, available / Double(columns))
+    }
+
+    /// Packs the tiles into rows, filling each row until the next tile's span
+    /// no longer fits. A tile wider than the grid is simply capped at full
+    /// width, which is what `span(…columns:)` already guarantees.
+    private func rows(columns: Int) -> [[ProcessController]] {
+        var rows: [[ProcessController]] = []
+        var current: [ProcessController] = []
+        var used = 0
+        for controller in controllers {
+            let span = self.span(controller, columns: columns)
+            if used + span > columns, !current.isEmpty {
+                rows.append(current)
+                current = []
+                used = 0
+            }
+            current.append(controller)
+            used += span
         }
-        return [GridItem(.adaptive(minimum: Self.minTileWidth, maximum: 720), spacing: Self.spacing)]
+        if !current.isEmpty { rows.append(current) }
+        return rows
+    }
+
+    private func span(_ controller: ProcessController, columns: Int) -> Int {
+        layout.span(projectID: controller.projectID,
+                    process: controller.spec.name,
+                    columns: columns)
     }
 
     var body: some View {
@@ -86,10 +135,33 @@ struct GridView: View {
     }
 
     private var content: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: Self.spacing) {
-                ForEach(controllers) { controller in
-                    GridTile(controller: controller,
+        let columns = columns(for: measuredSize.width)
+        let cell = cellWidth(for: measuredSize.width, columns: columns)
+        return ScrollView {
+            VStack(spacing: Self.spacing) {
+                ForEach(Array(rows(columns: columns).enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .top, spacing: Self.spacing) {
+                        ForEach(row) { controller in
+                            tile(controller, columns: columns, cell: cell)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(Self.padding)
+        }
+        .sheet(item: $renaming) { target in
+            RenameSheet(target: target) { newName in
+                if case .process(let projectID, let process, _) = target {
+                    layout.rename(projectID: projectID, process: process, to: newName)
+                }
+            }
+        }
+    }
+
+    private func tile(_ controller: ProcessController, columns: Int, cell: Double) -> some View {
+        let span = self.span(controller, columns: columns)
+        return GridTile(controller: controller,
                              projectName: projectNames.count > 1 ? projectNames[controller.projectID] : nil,
                              isSelected: controller.ref == selection,
                              onSelect: { selection = controller.ref },
@@ -102,7 +174,8 @@ struct GridView: View {
                                  draftHeight = nil
                              },
                              sessions: controller.spec.kind == .agent
-                                 ? claudeSessions.sessions(for: controller.projectID)
+                                 ? agentSessions.sessions(for: controller.projectID,
+                                                          provider: controller.spec.agentProvider)
                                  : [],
                              label: layout.displayName(projectID: controller.projectID,
                                                        process: controller.spec.name),
@@ -128,18 +201,18 @@ struct GridView: View {
                                  : nil,
                              onRemove: canRemove(controller.ref)
                                  ? { onRemove(controller.ref) }
-                                 : nil)
-                }
-            }
-            .padding(Self.padding)
-        }
-        .sheet(item: $renaming) { target in
-            RenameSheet(target: target) { newName in
-                if case .process(let projectID, let process, _) = target {
-                    layout.rename(projectID: projectID, process: process, to: newName)
-                }
-            }
-        }
+                                 : nil,
+                             removeEditsConfig: !isLocal(controller.ref),
+                             span: span,
+                             columns: columns,
+                             cellWidth: cell,
+                             onSpan: { newSpan in
+                                 guard newSpan != span else { return }
+                                 layout.setSpan(newSpan,
+                                                projectID: controller.projectID,
+                                                process: controller.spec.name)
+                             })
+            .frame(width: cell * Double(span) + Self.spacing * Double(span - 1))
     }
 
     private func drop(_ dragged: ProcessRef, before target: ProcessRef) {
@@ -170,16 +243,28 @@ private struct GridTile: View {
     let height: Double
     let onResize: (Double) -> Void
     let onResizeEnd: () -> Void
-    let sessions: [ClaudeSessionSummary]
+    let sessions: [AgentSessionSummary]
     let label: String
     let isHidden: Bool
     let onToggleHidden: () -> Void
     let onRename: () -> Void
     let onResetName: (() -> Void)?
     let onRemove: (() -> Void)?
+    /// True when removing edits ookook.yml rather than this Mac's own list.
+    var removeEditsConfig: Bool = false
+    /// How many grid columns this tile currently takes, and how many there are
+    /// to take. One tile can be worth more of the window than its neighbours -
+    /// the agent you are reading wants room; the four you are only watching for
+    /// a status dot do not.
+    let span: Int
+    let columns: Int
+    /// Width of a single column, so the side grip can turn a drag into a span.
+    let cellWidth: Double
+    let onSpan: (Int) -> Void
 
     @State private var isTargeted = false
     @State private var isHoveringGrip = false
+    @State private var isHoveringWidthGrip = false
     /// Height when the current drag began; nil when not dragging.
     @State private var dragStartHeight: Double?
 
@@ -198,6 +283,7 @@ private struct GridTile: View {
         )
         .frame(height: height)
         .overlay(alignment: .bottom) { resizeGrip }
+        .overlay(alignment: .trailing) { widthGrip }
         // No tap gesture spans the tile. One covering the terminal eats the
         // click before SwiftTerm sees it, which leaves the terminal unable to
         // take keyboard focus - the tile looks alive but will not accept
@@ -231,6 +317,16 @@ private struct GridTile: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                     .help("Hidden from the grid; still running")
+            }
+            // A wedged terminal is indistinguishable from a healthy one - it
+            // still prints, it still scrolls - so the only way to know is to
+            // be told. Without this the failure reads as "the app has stopped
+            // accepting my keyboard", which is where the hunt starts wrong.
+            if controller.isInputWedged {
+                Image(systemName: "keyboard.badge.ellipsis")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .help("Input path lost - typing is discarded. Restart to recover; the conversation is kept.")
             }
             Spacer(minLength: 4)
             Button {
@@ -273,6 +369,37 @@ private struct GridTile: View {
         .processDraggable(controller.ref)
         .contextMenu { actions }
         .help("Click to select, double-click to open full size, drag to reorder")
+    }
+
+    /// The same idea as the bottom grip, along the right edge: dragging it
+    /// snaps the tile to whole columns, because a grid whose tiles are all
+    /// slightly different widths reads as broken rather than as arranged.
+    private var widthGrip: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 8)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                isHoveringWidthGrip = inside
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        let unit = cellWidth + GridView.spacing
+                        guard unit > 0 else { return }
+                        let width = cellWidth * Double(span) + GridView.spacing * Double(span - 1)
+                        let dragged = width + (value.location.x - value.startLocation.x)
+                        let wanted = Int(((dragged + GridView.spacing) / unit).rounded())
+                        onSpan(min(max(1, wanted), columns))
+                    })
+            .overlay {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.secondary.opacity(isHoveringWidthGrip ? 0.5 : 0))
+                    .frame(width: 3, height: 28)
+            }
+            .onTapGesture(count: 2) { onSpan(1) }
+            .help("Drag to widen this tile across columns")
     }
 
     /// A grab strip along the bottom edge. Sized generously (8pt) because a
@@ -320,16 +447,37 @@ private struct GridTile: View {
 
     @ViewBuilder
     private var actions: some View {
+        if columns > 1 {
+            Menu("Width") {
+                ForEach(1...columns, id: \.self) { count in
+                    Button {
+                        onSpan(count)
+                    } label: {
+                        if count == span {
+                            Label(widthLabel(count), systemImage: "checkmark")
+                        } else {
+                            Text(widthLabel(count))
+                        }
+                    }
+                }
+            }
+            Divider()
+        }
         ProcessActionItems(controller: controller,
                            isHidden: isHidden,
                            onToggleHidden: onToggleHidden,
                            onRename: onRename,
                            onResetName: onResetName,
                            onRemove: onRemove,
+                           removeEditsConfig: removeEditsConfig,
                            sessions: sessions,
                            onResume: { controller.resume($0) },
                            onClearResume: { controller.clearResume() },
                            isResuming: controller.commandOverride != nil)
+    }
+
+    private func widthLabel(_ count: Int) -> String {
+        count == columns ? "Full width" : "\(count) of \(columns) columns"
     }
 
     private var borderColor: Color {

@@ -27,6 +27,9 @@ struct ProjectLayout: Codable, Equatable {
     /// Processes hidden from the grid. They keep running - this is about
     /// getting something out of your eyeline, not stopping it.
     var hidden: Set<String> = []
+    /// How many grid columns a tile takes. Missing means one, so a layout
+    /// written before tiles could be widened still reads back correctly.
+    var spans: [String: Int] = [:]
 
     var isCustom: Bool { !groups.isEmpty }
 
@@ -97,6 +100,23 @@ final class SidebarLayoutStore: ObservableObject {
 
     func isHidden(projectID: String, process: String) -> Bool {
         layout(for: projectID).hidden.contains(process)
+    }
+
+    /// How many columns this process's grid tile spans, clamped to what the
+    /// grid currently has room for.
+    func span(projectID: String, process: String, columns: Int) -> Int {
+        let stored = layout(for: projectID).spans[process] ?? 1
+        return min(max(1, stored), max(1, columns))
+    }
+
+    func setSpan(_ span: Int, projectID: String, process: String) {
+        update(projectID) { layout in
+            if span <= 1 {
+                layout.spans.removeValue(forKey: process)
+            } else {
+                layout.spans[process] = span
+            }
+        }
     }
 
     func setHidden(_ hidden: Bool, projectID: String, process: String) {
@@ -296,6 +316,20 @@ final class SidebarLayoutStore: ObservableObject {
                 layout.names.removeValue(forKey: process)
             } else {
                 layout.names[process] = trimmed
+            }
+        }
+    }
+
+    /// Forgets a removed process: its label, its hidden flag, its tile width
+    /// and its place in a group. Names are the identity here, so leaving these
+    /// behind would silently apply them to the next process given that name.
+    func forget(projectID: String, process: String) {
+        update(projectID) { layout in
+            layout.names.removeValue(forKey: process)
+            layout.hidden.remove(process)
+            layout.spans.removeValue(forKey: process)
+            for index in layout.groups.indices {
+                layout.groups[index].members.removeAll { $0 == process }
             }
         }
     }

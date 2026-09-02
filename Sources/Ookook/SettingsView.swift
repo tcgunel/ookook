@@ -404,6 +404,8 @@ private struct OokookPreferencesTab: View {
     @AppStorage("notifySound") private var notifySound: Bool = true
     @AppStorage("notifyBanners") private var notifyBanners: Bool = true
     @AppStorage(ClaudeLaunchOptions.skipPermissionsKey) private var skipPermissions: Bool = false
+    @AppStorage(ClaudeLaunchOptions.codexBypassApprovalsAndSandboxKey)
+    private var bypassCodexApprovalsAndSandbox: Bool = true
 
     var body: some View {
         Form {
@@ -412,6 +414,14 @@ private struct OokookPreferencesTab: View {
                        isOn: $skipPermissions)
                 Text("Agents run every tool call without asking - including writes, "
                      + "deletes and shell commands. Applies to sessions started from now on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Codex") {
+                Toggle("Run with --yolo (bypass approvals and sandbox)",
+                       isOn: $bypassCodexApprovalsAndSandbox)
+                Text("Codex runs without asking and with unrestricted system access. "
+                     + "Enable only in a workspace you fully trust. Applies to sessions started from now on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -18,6 +18,11 @@ struct ContentView: View {
     /// Reported by the grid, so Fit knows how much room there is.
     @State private var gridSize: CGSize = .zero
 
+    /// Columns the grid is laid out in right now, by the grid's own arithmetic.
+    private var liveColumnCount: Int {
+        GridView.columnCount(for: gridSize.width, preferred: gridColumns)
+    }
+
     private var mode: ViewMode {
         get { ViewMode(rawValue: storedMode) ?? .single }
         nonmutating set { storedMode = newValue.rawValue }
@@ -29,6 +34,13 @@ struct ContentView: View {
         } detail: {
             detail
         }
+        // ⌘↑/⌘↓ move a grid row, so the model needs the count the layout just
+        // used. Reported from here rather than published by the grid: it
+        // changes on every window resize, and a published value would repaint
+        // every tile for something nothing draws.
+        .onChange(of: gridSize) { app.gridColumnCount = liveColumnCount }
+        .onChange(of: gridColumns) { app.gridColumnCount = liveColumnCount }
+        .onAppear { app.gridColumnCount = liveColumnCount }
         .toolbar {
             ToolbarItemGroup {
                 Picker("View", selection: Binding(get: { mode }, set: { mode = $0 })) {
@@ -91,19 +103,31 @@ struct ContentView: View {
         }
     }
 
+    /// Projects with nothing running in them sink to the bottom.
+    ///
+    /// A project you have not put a process in yet is a placeholder, and a
+    /// column of placeholders between the two projects you are actually working
+    /// in is exactly the noise a sidebar should not have. The hand-arranged
+    /// order is kept within each half, so adding a process puts a project back
+    /// where it was.
+    private var sortedProjects: [Project] {
+        app.projects.filter { !$0.controllers.isEmpty } + app.projects.filter { $0.controllers.isEmpty }
+    }
+
     private var sidebar: some View {
         List(selection: $app.selection) {
-            ForEach(app.projects) { project in
+            ForEach(sortedProjects) { project in
                 ProjectSection(project: project,
                                ssh: app.ssh,
-                               claudeSessions: app.claudeSessions,
+                               agentSessions: app.agentSessions,
                                resources: app.resources,
                                agents: app.agents,
                                git: app.git,
                                layout: app.layout,
                                onClose: { app.close(project) },
                                position: app.projectPosition(project.id),
-                               onMove: { app.moveProject(project.id, by: $0) })
+                               onMove: { app.moveProject(project.id, by: $0) },
+                               isDimmed: project.controllers.isEmpty)
             }
         }
         .listStyle(.sidebar)
@@ -165,13 +189,16 @@ struct ContentView: View {
                      layout: app.layout,
                      controllersByProject: Dictionary(uniqueKeysWithValues: app.projects.map { ($0.id, $0.controllers) }),
                      onMoveProject: { app.moveProject($0, before: $1) },
-                     claudeSessions: app.claudeSessions,
-                     canRemove: { app.isLocal($0) },
-                     onRemove: { app.removeLocal($0) })
+                     agentSessions: app.agentSessions,
+                     canRemove: { app.canRemove($0) },
+                     isLocal: { app.isLocal($0) },
+                     onRemove: { app.remove($0) })
         } else if let controller = app.selectedController {
             VStack(spacing: 0) {
                 ResumeOfferBar(controller: controller,
-                               sessions: app.claudeSessions.sessions(for: controller.projectID))
+                               sessions: app.agentSessions.sessions(
+                                   for: controller.projectID,
+                                   provider: controller.spec.agentProvider))
                 TerminalPane(controller: controller)
             }
             .id(controller.ref.id)
@@ -194,7 +221,7 @@ struct ContentView: View {
 private struct ProjectSection: View {
     @ObservedObject var project: Project
     @ObservedObject var ssh: SSHConnectionStore
-    @ObservedObject var claudeSessions: ClaudeSessionStore
+    @ObservedObject var agentSessions: AgentSessionStore
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
     @ObservedObject var git: GitMonitor
@@ -205,6 +232,9 @@ private struct ProjectSection: View {
     /// express.
     let position: (index: Int, count: Int)?
     let onMove: (Int) -> Void
+    /// True for a project with no processes yet, which is shown faded at the
+    /// bottom of the sidebar.
+    var isDimmed: Bool = false
 
     /// What the rename sheet is currently editing.
     @State private var renaming: RenameTarget?
@@ -231,13 +261,17 @@ private struct ProjectSection: View {
                     .lineLimit(3)
             }
             if project.loadError == nil && project.controllers.isEmpty {
-                Button("Add Claude Code here") { project.add(.claudeAgent()) }
-                    .buttonStyle(.link)
-                    .font(.caption)
+                HStack(spacing: 8) {
+                    Button("Add Claude Code") { project.add(.claudeAgent()) }
+                    Button("Add Codex") { project.add(.codexAgent()) }
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                .opacity(isDimmed ? 0.5 : 1)
             }
             ForEach(layout.sections(projectID: project.id, controllers: project.controllers)) { section in
                 SidebarGroupView(project: project,
-                                 claudeSessions: claudeSessions,
+                                 agentSessions: agentSessions,
                                  section: section,
                                  resources: resources,
                                  agents: agents,
@@ -258,6 +292,7 @@ private struct ProjectSection: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
+            .opacity(isDimmed ? 0.5 : 1)
             .help(project.rootURL.path)
             .sheet(isPresented: $addingCommand) {
                 NewCommandSheet { name, command in
@@ -276,6 +311,7 @@ private struct ProjectSection: View {
             }
             .contextMenu {
                 Button("Add Claude Code") { project.add(.claudeAgent()) }
+                Button("Add Codex") { project.add(.codexAgent()) }
                 Button("Add Terminal") { project.add(.shell()) }
                 Button("Add Command…") { addingCommand = true }
                 Menu("New SSH Session") {
@@ -322,7 +358,7 @@ private struct ProjectSection: View {
 /// layout, otherwise one of the agent/command/terminal kinds.
 private struct SidebarGroupView: View {
     @ObservedObject var project: Project
-    @ObservedObject var claudeSessions: ClaudeSessionStore
+    @ObservedObject var agentSessions: AgentSessionStore
     let section: SidebarSection
     @ObservedObject var resources: ResourceMonitor
     @ObservedObject var agents: AgentMonitor
@@ -336,7 +372,8 @@ private struct SidebarGroupView: View {
             ForEach(section.controllers) { controller in
                 ProcessRow(controller: controller,
                            sessions: controller.spec.kind == .agent
-                               ? claudeSessions.sessions(for: project.id)
+                               ? agentSessions.sessions(for: project.id,
+                                                        provider: controller.spec.agentProvider)
                                : [],
                            label: layout.displayName(projectID: project.id,
                                                      process: controller.spec.name),
@@ -355,9 +392,14 @@ private struct SidebarGroupView: View {
                                                  process: controller.spec.name,
                                                  to: "") }
                                : nil,
-                           onRemove: project.isLocal(process: controller.spec.name)
-                               ? { project.removeLocal(process: controller.spec.name) }
+                           onRemove: project.canRemove(process: controller.spec.name)
+                               ? {
+                                   project.remove(process: controller.spec.name)
+                                   layout.forget(projectID: project.id,
+                                                 process: controller.spec.name)
+                               }
                                : nil,
+                           removeEditsConfig: !project.isLocal(process: controller.spec.name),
                            isHidden: layout.isHidden(projectID: project.id,
                                                      process: controller.spec.name),
                            onToggleHidden: {
@@ -484,7 +526,7 @@ private struct GroupDropTarget: ViewModifier {
 
 private struct ProcessRow: View {
     @ObservedObject var controller: ProcessController
-    let sessions: [ClaudeSessionSummary]
+    let sessions: [AgentSessionSummary]
     let label: String
     let memory: UInt64?
     let cpu: Double?
@@ -492,9 +534,11 @@ private struct ProcessRow: View {
     let onRename: () -> Void
     /// Present only when the row is showing a user-given name.
     let onResetName: (() -> Void)?
-    /// Present only for processes added from the UI; config-declared ones
-    /// belong to ookook.yml and cannot be deleted from here.
+    /// Absent only when there is nothing safe to remove - the last process a
+    /// config declares.
     let onRemove: (() -> Void)?
+    /// True when removing edits ookook.yml rather than this Mac's own list.
+    var removeEditsConfig: Bool = false
     let isHidden: Bool
     let onToggleHidden: () -> Void
 
@@ -509,7 +553,8 @@ private struct ProcessRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            StatusDot(status: controller.status)
+            StatusDot(status: controller.status,
+                      isBusy: controller.status.isRunning && session?.activity == .busy)
                 .padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
@@ -572,6 +617,7 @@ private struct ProcessRow: View {
                                onRename: onRename,
                                onResetName: onResetName,
                                onRemove: onRemove,
+                               removeEditsConfig: removeEditsConfig,
                                sessions: sessions,
                                onResume: { controller.resume($0) },
                                onClearResume: { controller.clearResume() },

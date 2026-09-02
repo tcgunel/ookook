@@ -25,7 +25,7 @@ The core loop works and is verified end to end.
 | Live activity line per process | Last line of output, in the sidebar |
 | **MCP server over HTTP** | `list_processes`, `get_process_output`, `start`/`stop`/`restart` |
 
-Claude Code connects with one command and reports `✔ Connected`.
+Claude Code and Codex connect with one command and report `✔ Connected`.
 
 ---
 
@@ -48,7 +48,7 @@ This is the actual product. Solo's own pitch is "agents flying blind"; every ite
 here makes an agent more useful, and this is where a buyer's money goes.
 
 - [ ] **`wait_for_port`** MCP tool - agents stop polling log lines to know a server is up - parity
-- [ ] **Agent working/idle detection** - know when Claude Code is waiting on you - parity
+- [ ] **Agent working/idle detection** - know when an agent is waiting on you - parity
 - [ ] **Attention state in the sidebar** + one keystroke to jump to whoever needs you - parity
 - [ ] **`send_input`** - let an agent answer a prompt in another process - parity
 - [ ] **Shared todos / scratchpads / locks** across agents - parity (Solo's differentiator)
@@ -95,7 +95,7 @@ Honest risks:
 
 - Solo is further along, has Windows, and Aaron Francis has a large audience.
   Beating it on features is unlikely; beating it on price and agent ergonomics
-  for Claude Code specifically is plausible.
+  for coding agents is plausible.
 - Mac-only halves the market.
 - Terminal emulators have a long tail of correctness bugs (mouse, wide chars,
   ligatures, reflow). SwiftTerm absorbs most of that, but not all of it.

@@ -2,12 +2,11 @@ import Foundation
 
 /// Exposes the running workspace to AI agents over MCP.
 ///
-/// Transport is JSON-RPC over HTTP on loopback, so a client connects with
-/// `claude mcp add --transport http ookook http://127.0.0.1:<port>/mcp` and
-/// needs no helper binary - the app itself is the server.
+/// Transport is JSON-RPC over HTTP on loopback, so Claude Code and Codex can
+/// connect directly to the app without a helper binary.
 @MainActor
 final class MCPServer: ObservableObject {
-    static let defaultPort: UInt16 = 4517
+    nonisolated static let defaultPort: UInt16 = 4517
 
     private weak var app: AppModel?
     private var http: HTTPServer?
@@ -44,13 +43,19 @@ final class MCPServer: ObservableObject {
     }
 
     /// The line to paste into a terminal to connect Claude Code.
-    var connectCommand: String? {
+    var claudeConnectCommand: String? {
         guard let port else { return nil }
         return "claude mcp add --transport http ookook http://127.0.0.1:\(port)/mcp"
     }
 
+    /// The corresponding command for Codex's streamable-HTTP MCP syntax.
+    var codexConnectCommand: String? {
+        guard let port else { return nil }
+        return "codex mcp add ookook --url http://127.0.0.1:\(port)/mcp"
+    }
+
     /// A per-project endpoint, for an agent that should always mean one project.
-    func connectCommand(for project: Project) -> String? {
+    func claudeConnectCommand(for project: Project) -> String? {
         guard let port else { return nil }
         let slug = Self.slug(for: project)
         return "claude mcp add --transport http ookook-\(slug) http://127.0.0.1:\(port)/mcp/\(slug)"
@@ -282,6 +287,12 @@ final class MCPServer: ObservableObject {
                 // conversation, which is the one thing an agent reading this
                 // needs to know before restarting it.
                 row += "\n    command: \(controller.commandOverride ?? controller.spec.command)"
+                if controller.isInputWedged {
+                    row += "\n    input: DEAD - the child is alive and still"
+                        + " printing, but its input path is gone and everything"
+                        + " typed or sent is discarded. Restart it to recover;"
+                        + " the resume command above keeps the conversation."
+                }
                 if let session = app.agents.sessions[controller.ref.id] {
                     row += "\n    agent: \(session.activity.label)"
                     if let summary = session.contextSummary {
@@ -347,6 +358,15 @@ final class MCPServer: ObservableObject {
             }
             guard controller.status.isRunning else {
                 throw ToolError.message("\(controller.spec.name) is not running.")
+            }
+            // Reporting a send that went nowhere as a success is how this
+            // failure stayed invisible: the caller believes it answered a
+            // prompt and waits forever for a reply that was never asked for.
+            guard !controller.isInputWedged else {
+                throw ToolError.message(
+                    "\(controller.spec.name) has lost its input path - it is still"
+                    + " running and printing, but nothing sent to it arrives."
+                    + " Restart it to recover; the conversation is preserved.")
             }
             controller.send(text: text, submit: arguments["submit"] as? Bool ?? true)
             return "Sent to \(controller.spec.name): \(text)"

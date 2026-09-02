@@ -54,9 +54,10 @@ struct TerminalPane: NSViewRepresentable {
             self.controller = controller
             guard attached !== view else { return }
             attached = view
-            let click = NSClickGestureRecognizer(target: self, action: #selector(clicked))
-            click.delaysPrimaryMouseButtonEvents = false
-            view.addGestureRecognizer(click)
+            // The view owns the recogniser and replaces its previous one, so a
+            // terminal that has passed through several panes still carries
+            // exactly one rather than one per pane it has ever been in.
+            view.installFocusClick(target: self, action: #selector(clicked))
         }
 
         @objc private func clicked() {
@@ -76,22 +77,59 @@ final class TerminalHostView: NSView {
         hosted?.removeFromSuperview()
         hosted = view
         view.frame = bounds
-        view.autoresizingMask = [.width, .height]
         addSubview(view)
+        needsLayout = true
         // A swap usually means the old process just died under the user's
         // cursor; put the keyboard back where they were looking.
         if window?.firstResponder == nil || window?.firstResponder === self {
             window?.makeFirstResponder(view)
         }
     }
+
+    /// Keeps the terminal exactly the size of the tile, on every layout pass.
+    ///
+    /// This used to be left to an autoresizing mask, which resizes a subview
+    /// *proportionally* to how its superview grew. That works only if the view
+    /// started with a sensible frame, and a tile is routinely hosted before
+    /// SwiftUI has laid it out - so `bounds` is still zero when the terminal is
+    /// added, and a zero frame scaled by any factor is still zero. The terminal
+    /// then reports a 0x0 window to the pty, the child has no screen to paint
+    /// on, and the tile looks alive while rendering nothing and swallowing
+    /// every keystroke. Tiles that did start with a frame drifted instead:
+    /// changing the column count left each pty at a different stale size, which
+    /// is why identically sized tiles rendered at different widths.
+    ///
+    /// Setting the frame from `bounds` here is authoritative and cannot drift,
+    /// and it re-runs whenever the tile changes size.
+    override func layout() {
+        super.layout()
+        guard let hosted, hosted.frame != bounds else { return }
+        hosted.frame = bounds
+    }
 }
 
 struct StatusDot: View {
     let status: ProcessStatus
+    /// True while an agent is actually working, which makes the dot breathe.
+    ///
+    /// Claude Code's own spinner is the thing you watch to know it is still
+    /// thinking, and it is invisible from the sidebar; a still dot says
+    /// "running" but not "running right now".
+    var isBusy: Bool = false
+
+    @State private var pulsing = false
 
     var body: some View {
         Circle()
             .fill(Color(nsColor: status.tint))
             .frame(width: 8, height: 8)
+            .scaleEffect(isBusy && pulsing ? 1.25 : 1)
+            .opacity(isBusy && pulsing ? 0.45 : 1)
+            .animation(isBusy
+                       ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                       : .default,
+                       value: pulsing)
+            .onAppear { pulsing = isBusy }
+            .onChange(of: isBusy) { pulsing = isBusy }
     }
 }

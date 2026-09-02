@@ -19,12 +19,39 @@ final class LoggingTerminalView: LocalProcessTerminalView {
     /// the terminal its keyboard focus.
     var onBecomeFirstResponder: (() -> Void)?
 
+    /// The click recogniser that reports focus, owned by the view rather than
+    /// by whichever pane is currently showing it.
+    ///
+    /// One terminal outlives many panes: it is hosted by a grid tile, then by
+    /// the single-pane view, then by a fresh tile after a reload, and each of
+    /// those builds its own coordinator. A coordinator that simply added a
+    /// recogniser left the previous one attached for good, so they piled up on
+    /// the same long-lived view - invisibly, and without bound. Enough of them
+    /// and mouse handling degrades until clicking a terminal no longer focuses
+    /// it, which reads as a terminal that has stopped accepting the keyboard.
+    private var focusClick: NSGestureRecognizer?
+
+    /// Installs the focus recogniser, replacing any previous one.
+    func installFocusClick(target: AnyObject, action: Selector) {
+        if let focusClick { removeGestureRecognizer(focusClick) }
+        let click = NSClickGestureRecognizer(target: target, action: action)
+        // The click must still reach the terminal, so selecting text and
+        // placing the cursor keep working; we merely hear about it.
+        click.delaysPrimaryMouseButtonEvents = false
+        addGestureRecognizer(click)
+        focusClick = click
+    }
+
     /// Cmd-clicking a path in the output opens it.
     ///
     /// SwiftTerm's default hands the raw text to `URL(string:)`, so a relative
     /// path like `thoughts/listing/preview.png` becomes a schemeless URL and
     /// `NSWorkspace.open` fails with -50. Resolve it as a file first.
     override func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        // A path we already resolved from the buffer wins: SwiftTerm's own
+        // match for the same click is the truncated one we are working around.
+        guard !suppressLinkOpen else { return }
+
         let trimmed = link.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\"'`<>()[]{},"))
         guard !trimmed.isEmpty else { return }
 
@@ -38,6 +65,151 @@ final class LoggingTerminalView: LocalProcessTerminalView {
         }
         // Nothing we can open - stay quiet rather than raising a -50 alert.
         NSSound.beep()
+    }
+
+    /// Set while `super.mouseUp` runs for a click we have already resolved
+    /// ourselves, so SwiftTerm's own link does not open a second thing.
+    private var suppressLinkOpen = false
+
+    /// Cmd-click resolves the path out of the terminal buffer first.
+    ///
+    /// SwiftTerm's link detection stops at the row it matched on, so a path
+    /// long enough to wrap opens as its first line only, and a bare relative
+    /// name like `Package.swift` never matches its pattern at all. Reading the
+    /// cells around the click and asking the filesystem covers both; anything
+    /// we cannot resolve falls through to SwiftTerm untouched, which is what
+    /// still opens `https://` links.
+    override func mouseUp(with event: NSEvent) {
+        guard event.modifierFlags.contains(.command),
+              let url = fileURL(underClick: event) else {
+            super.mouseUp(with: event)
+            return
+        }
+        suppressLinkOpen = true
+        super.mouseUp(with: event)
+        suppressLinkOpen = false
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Characters a path can be made of. Deliberately narrower than the shell
+    /// allows: a space or a quote is far more often the end of the path than
+    /// part of it, and guessing wide turns "open this file" into "open the
+    /// rest of the sentence".
+    private static let pathCharacters = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/~+@%$:#=")
+
+    private func fileURL(underClick event: NSEvent) -> URL? {
+        guard let hit = gridPosition(of: event) else { return nil }
+        guard let (text, cells) = wrappedText(around: hit.row) else { return nil }
+        guard let index = cells.firstIndex(where: { $0.row == hit.row && $0.col == hit.col })
+        else { return nil }
+
+        let characters = Array(text)
+        guard index < characters.count, isPathCharacter(characters[index]) else { return nil }
+
+        var start = index
+        while start > 0 && isPathCharacter(characters[start - 1]) { start -= 1 }
+        var end = index
+        while end + 1 < characters.count && isPathCharacter(characters[end + 1]) { end += 1 }
+
+        var candidate = String(characters[start...end])
+        while let last = candidate.last, ".,:;".contains(last), candidate.count > 1 {
+            candidate.removeLast()
+        }
+        return resolveFile(candidate)
+    }
+
+    private func isPathCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy { Self.pathCharacters.contains($0) }
+    }
+
+    /// The screen cell under the pointer.
+    ///
+    /// SwiftTerm computes this internally but does not expose it, so this
+    /// mirrors its arithmetic: cells are laid out from the top-left with no
+    /// padding, and their size comes from the font's line metrics and the
+    /// advancement of `W`, snapped to the pixel grid.
+    private func gridPosition(of event: NSEvent) -> (col: Int, row: Int)? {
+        let terminal = getTerminal()
+        let point = convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 2
+
+        let ctFont = font as CTFont
+        let lineHeight = CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont)
+        let cellHeight = max(1, ceil(ceil(lineHeight) * scale) / scale)
+        let advance = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        let cellWidth = max(1, (advance * scale).rounded() / scale)
+
+        let col = Int(point.x / cellWidth)
+        let row = Int((frame.height - point.y) / cellHeight)
+        guard row >= 0, row < terminal.rows else { return nil }
+        return (col: min(max(0, col), terminal.cols - 1), row: row)
+    }
+
+    private struct CellRef {
+        let row: Int
+        let col: Int
+    }
+
+    /// The text of the wrapped line group `row` belongs to, with the screen
+    /// cell each character came from.
+    ///
+    /// A path wider than the terminal is one string split across rows, and the
+    /// only way to open it is to put it back together before matching.
+    private func wrappedText(around row: Int) -> (String, [CellRef])? {
+        let terminal = getTerminal()
+        guard terminal.getLine(row: row) != nil else { return nil }
+
+        var startRow = row
+        while startRow > 0, isContinuation(row: startRow) { startRow -= 1 }
+        var endRow = row
+        while endRow + 1 < terminal.rows, isContinuation(row: endRow + 1) { endRow += 1 }
+
+        var text = ""
+        var cells: [CellRef] = []
+        for current in startRow...endRow {
+            guard let line = terminal.getLine(row: current) else { continue }
+            let limit = min(terminal.cols, line.count)
+            guard limit > 0 else { continue }
+            // Continuation rows may be indented by whatever drew them; the
+            // path resumes at the first thing that is not a space.
+            var col = 0
+            if current != startRow {
+                while col < limit, line[col].getCharacter() == " " { col += 1 }
+            }
+            while col < limit {
+                var character = line[col].getCharacter()
+                if character == "\u{0}" { character = " " }
+                text.append(character)
+                cells.append(CellRef(row: current, col: col))
+                col += 1
+            }
+        }
+        return text.isEmpty ? nil : (text, cells)
+    }
+
+    /// Whether `row` continues the row above it - either because the terminal
+    /// wrapped it, or because the row above ran to the edge and the seam reads
+    /// as one unbroken path (which is how a program that wraps its own output
+    /// leaves a long path behind).
+    private func isContinuation(row: Int) -> Bool {
+        let terminal = getTerminal()
+        guard row > 0, let line = terminal.getLine(row: row) else { return false }
+        if line.isWrapped { return true }
+        guard let above = terminal.getLine(row: row - 1) else { return false }
+
+        let aboveLimit = min(terminal.cols, above.count)
+        var lastCol = aboveLimit - 1
+        while lastCol >= 0, above[lastCol].getCharacter() == " " { lastCol -= 1 }
+        guard lastCol >= terminal.cols - 2, isPathCharacter(above[lastCol].getCharacter()) else {
+            return false
+        }
+
+        let limit = min(terminal.cols, line.count)
+        var firstCol = 0
+        while firstCol < limit, line[firstCol].getCharacter() == " " { firstCol += 1 }
+        guard firstCol < limit else { return false }
+        return isPathCharacter(line[firstCol].getCharacter())
     }
 
     private func resolveFile(_ text: String) -> URL? {
