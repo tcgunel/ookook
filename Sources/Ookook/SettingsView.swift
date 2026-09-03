@@ -403,7 +403,7 @@ private struct OokookPreferencesTab: View {
     @AppStorage("gridColumns") private var gridColumns: Int = 0
     @AppStorage("notifySound") private var notifySound: Bool = true
     @AppStorage("notifyBanners") private var notifyBanners: Bool = true
-    @AppStorage(ClaudeLaunchOptions.skipPermissionsKey) private var skipPermissions: Bool = false
+    @AppStorage(ClaudeLaunchOptions.skipPermissionsKey) private var skipPermissions: Bool = true
     @AppStorage(ClaudeLaunchOptions.codexBypassApprovalsAndSandboxKey)
     private var bypassCodexApprovalsAndSandbox: Bool = true
 

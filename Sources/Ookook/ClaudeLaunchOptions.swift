@@ -14,7 +14,14 @@ enum ClaudeLaunchOptions {
     static let codexBypassApprovalsAndSandboxFlag = "--yolo"
 
     static var skipsPermissions: Bool {
-        UserDefaults.standard.bool(forKey: skipPermissionsKey)
+        // Ookook sessions are meant to run unattended, so an unset preference
+        // means enabled; only an explicit opt-out saved by the user turns the
+        // flag off. Without it Claude Code falls back to whatever
+        // `permissions.defaultMode` says in `~/.claude/settings.json`.
+        guard UserDefaults.standard.object(forKey: skipPermissionsKey) != nil else {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: skipPermissionsKey)
     }
 
     static var bypassesCodexApprovalsAndSandbox: Bool {
