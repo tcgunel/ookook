@@ -56,6 +56,9 @@ final class AgentSessionStore: ObservableObject {
     private nonisolated static let headBytes = 512 * 1024
     /// Enough of the tail to find the last assistant message with a model on it.
     private nonisolated static let tailBytes = 2 * 1024 * 1024
+    /// A transcript of a few hundred bytes is a session that opened and was
+    /// closed again; resuming it lands you nowhere.
+    nonisolated static let minimumTranscriptBytes = 2_000
 
     private var refreshing: Set<String> = []
 
@@ -116,9 +119,7 @@ final class AgentSessionStore: ObservableObject {
                 guard let date = values?.contentModificationDate else { return nil }
                 return (url, date, values?.fileSize ?? 0)
             }
-            // A transcript of a few hundred bytes is a session that opened and
-            // was closed again; resuming it lands you nowhere.
-            .filter { $0.2 > 2_000 }
+            .filter { $0.2 > minimumTranscriptBytes }
             .sorted { $0.1 > $1.1 }
             .prefix(maxSessions)
 

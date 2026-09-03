@@ -104,7 +104,11 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
                     TerminalAppearance.apply(to: self.terminalView)
                 }
             }
-        resumeOffer = LastSessionStore.entry(for: ref)
+        resumeOffer = LastSessionStore.entry(for: ref).flatMap { entry in
+            // An entry saved before the transcript check below existed, or
+            // one whose transcript has since been deleted, is not resumable.
+            isResumable(sessionID: entry.sessionID) ? entry : nil
+        }
         restoreScrollback()
     }
 
@@ -333,8 +337,25 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// offer it. Called on a timer and at quit, since a SIGTERM never reaches
     /// `applicationWillTerminate`.
     func rememberSession(_ session: AgentSession) {
-        guard spec.kind == .agent, !session.sessionID.isEmpty else { return }
+        guard spec.kind == .agent, !session.sessionID.isEmpty,
+              isResumable(sessionID: session.sessionID) else { return }
         LastSessionStore.record(sessionID: session.sessionID, model: session.model, for: ref)
+    }
+
+    /// Whether `claude --resume` would accept this id.
+    ///
+    /// Claude Code names a session id the moment it starts, but only writes
+    /// the transcript once there is a conversation to write. Resuming an id
+    /// with no transcript fails with "No conversation found" and exit 1, so a
+    /// terminal that was opened and never typed into must not be offered as a
+    /// previous session - it would crash on the offer. Codex ids come from
+    /// transcripts already on disk, so they need no check.
+    private func isResumable(sessionID: String) -> Bool {
+        guard spec.agentProvider == .claude else { return true }
+        let transcript = AgentSessionStore.claudeTranscriptDirectory(for: workingDirectory)
+            .appendingPathComponent("\(sessionID).jsonl")
+        let size = (try? transcript.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return size > AgentSessionStore.minimumTranscriptBytes
     }
 
     /// Records a transcript discovered directly on disk. Codex does not keep
