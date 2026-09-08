@@ -116,20 +116,62 @@ struct StatusDot: View {
     /// thinking, and it is invisible from the sidebar; a still dot says
     /// "running" but not "running right now".
     var isBusy: Bool = false
+    /// A running Claude Code process shows Claude's mark instead of a dot, so
+    /// the agents read as what they are at a glance.
+    var provider: AgentProvider? = nil
 
     @State private var pulsing = false
 
     var body: some View {
-        Circle()
-            .fill(Color(nsColor: status.tint))
-            .frame(width: 8, height: 8)
-            .scaleEffect(isBusy && pulsing ? 1.25 : 1)
-            .opacity(isBusy && pulsing ? 0.45 : 1)
-            .animation(isBusy
-                       ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                       : .default,
-                       value: pulsing)
-            .onAppear { pulsing = isBusy }
-            .onChange(of: isBusy) { pulsing = isBusy }
+        if provider == .claude, status.isRunning {
+            ClaudeMark(isBusy: isBusy)
+        } else {
+            Circle()
+                .fill(Color(nsColor: status.tint))
+                .frame(width: 8, height: 8)
+                .scaleEffect(isBusy && pulsing ? 1.25 : 1)
+                .opacity(isBusy && pulsing ? 0.45 : 1)
+                .animation(isBusy
+                           ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                           : .default,
+                           value: pulsing)
+                .onAppear { pulsing = isBusy }
+                .onChange(of: isBusy) { pulsing = isBusy }
+        }
+    }
+}
+
+/// Claude Code's spinner, in Claude's colour.
+///
+/// The frames are the ones Claude Code itself cycles through while it works,
+/// so the sidebar animates in step with what the terminal is showing. At rest
+/// it settles on the asterisk the prompt idles with.
+struct ClaudeMark: View {
+    var isBusy: Bool
+
+    private static let frames: [String] = ["·", "✢", "✳", "∗", "✻", "✽"]
+    private static let interval: TimeInterval = 0.12
+    static let orange = SwiftUI.Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
+
+    var body: some View {
+        Group {
+            if isBusy {
+                TimelineView(.periodic(from: .now, by: Self.interval)) { context in
+                    let tick = Int(context.date.timeIntervalSinceReferenceDate / Self.interval)
+                    glyph(Self.frames[tick % Self.frames.count])
+                }
+            } else {
+                glyph("✳")
+            }
+        }
+        .frame(width: 8, height: 8)
+    }
+
+    private func glyph(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Self.orange)
+            // Glyphs sit on a text baseline; the dot they replace is centred.
+            .offset(y: -1)
     }
 }

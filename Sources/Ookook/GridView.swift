@@ -299,7 +299,7 @@ private struct GridTile: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            StatusDot(status: controller.status)
+            StatusDot(status: controller.status, provider: controller.spec.agentProvider)
             if let projectName {
                 Text(projectName)
                     .font(.system(size: 11))

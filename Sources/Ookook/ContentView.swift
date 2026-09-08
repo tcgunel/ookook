@@ -554,7 +554,8 @@ private struct ProcessRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             StatusDot(status: controller.status,
-                      isBusy: controller.status.isRunning && session?.activity == .busy)
+                      isBusy: controller.status.isRunning && session?.activity == .busy,
+                      provider: controller.spec.agentProvider)
                 .padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
