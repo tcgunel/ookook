@@ -158,7 +158,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
                              + "── restarted ──\u{1B}[0m\r\n")
         }
         terminalView = replacement
-        previous.terminate()
+        previous.terminateProcess()
     }
 
     /// Replays the previous session's output into the fresh terminal, so a tile
@@ -228,7 +228,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         // Snapshot before the terminal is torn down: a stopped process is
         // exactly the one whose last output you want to still be able to read.
         persistScrollback()
-        terminalView.terminate()
+        terminalView.terminateProcess()
         settleAfterDeliberateTermination(relaunch: false)
     }
 
@@ -240,7 +240,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         }
         stopRequested = true
         pendingManualRestart = true
-        terminalView.terminate()
+        terminalView.terminateProcess()
         settleAfterDeliberateTermination(relaunch: true)
     }
 

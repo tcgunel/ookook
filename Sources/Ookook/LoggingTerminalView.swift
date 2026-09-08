@@ -9,6 +9,33 @@ import SwiftTerm
 final class LoggingTerminalView: LocalProcessTerminalView {
     let log = ProcessLog()
 
+    /// Owns the path from this terminal to its child's pty; see `send`.
+    private let writer = PTYWriter()
+
+    /// Every byte the terminal sends to the child - keystrokes, mouse reports,
+    /// replies to the program's own queries - goes through here rather than
+    /// SwiftTerm's `LocalProcess.send`, which hands each one to
+    /// `DispatchIO.write(toFileDescriptor:)`.
+    ///
+    /// That convenience channel has a failure mode that is fatal for a pty.
+    /// The moment one write hits EAGAIN - the child paused reading and the
+    /// ~1 KB pty input queue filled, which a burst of mouse-motion reports
+    /// does in a fraction of a second - libdispatch parks the descriptor's
+    /// write stream on a kqueue write source, and for a pty master that source
+    /// never fires. From then on every send to the terminal is queued behind
+    /// it for good: the tile silently stops taking input, and each queued
+    /// write keeps its data, its block and its closure alive. Measured in a
+    /// four-day session at 117 million such objects, 38 GB, most of it swapped
+    /// out - enough to freeze the machine.
+    ///
+    /// A blocking write on a private serial queue has neither problem. When
+    /// the child is not reading it waits in `poll` and carries on the moment
+    /// it does; nothing is retained beyond the bytes still to be written.
+    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        guard process.running, process.childfd >= 0 else { return }
+        writer.write(Array(data), to: process.childfd)
+    }
+
     /// Called on the main queue, coalesced, when new output has arrived.
     var onActivity: (() -> Void)?
 
@@ -313,4 +340,116 @@ extension LoggingTerminalView {
         return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+}
+
+// MARK: - Writing to the child
+
+extension LoggingTerminalView {
+    /// Ends the child and stops the writer with it, so a write that is still
+    /// waiting on a stalled child cannot land on whatever reuses the
+    /// descriptor. Use this rather than `terminate()` directly.
+    ///
+    /// Also reaps the child. SwiftTerm's `terminate()` cancels its own exit
+    /// monitor before sending SIGTERM, so the `waitpid` that monitor would have
+    /// run never happens and every process we stop ourselves is left a zombie
+    /// for the life of the app.
+    func terminateProcess() {
+        writer.close()
+        let pid = process.running ? process.shellPid : 0
+        terminate()
+        guard pid > 0 else { return }
+        Self.reap(pid)
+    }
+
+    /// Waits for `pid` to exit without blocking anything, then collects it.
+    private static func reap(_ pid: pid_t) {
+        var status: Int32 = 0
+        // Already gone: collect it now, and there is nothing to watch.
+        if waitpid(pid, &status, WNOHANG) == pid { return }
+        let exit = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit,
+                                                    queue: .global(qos: .utility))
+        exit.setEventHandler {
+            waitpid(pid, &status, WNOHANG)
+            exit.cancel()
+        }
+        exit.activate()
+        // A child that died between the first check and the source arming
+        // has already delivered its exit, which the source will not replay.
+        if waitpid(pid, &status, WNOHANG) == pid { exit.cancel() }
+    }
+}
+
+/// Serialises writes to one pty master.
+///
+/// The queue is the ordering guarantee: a keystroke typed while an earlier
+/// write is waiting for the child still arrives after it. Closing is a flag
+/// rather than a queued job so it takes effect even while a write is parked
+/// in `poll`.
+final class PTYWriter {
+    private let queue = DispatchQueue(label: "com.tolga.ookook.pty-write", qos: .userInitiated)
+    private let lock = NSLock()
+    private var closed = false
+    private var pendingBytes = 0
+
+    /// A child that has stopped reading for a long time (suspended, or wedged)
+    /// must not turn the mouse into an unbounded backlog again. Past this much
+    /// unwritten input, new writes are dropped rather than queued; input to a
+    /// terminal that is not listening is lost either way.
+    private let maxPendingBytes = 256 * 1024
+
+    func write(_ bytes: [UInt8], to fd: Int32) {
+        lock.lock()
+        guard !closed, pendingBytes + bytes.count <= maxPendingBytes else {
+            lock.unlock()
+            return
+        }
+        pendingBytes += bytes.count
+        lock.unlock()
+
+        queue.async { [self] in
+            defer {
+                lock.lock()
+                pendingBytes -= bytes.count
+                lock.unlock()
+            }
+            var offset = 0
+            while offset < bytes.count {
+                guard !isClosed else { return }
+                let written = bytes.withUnsafeBytes { buffer -> Int in
+                    Darwin.write(fd, buffer.baseAddress! + offset, bytes.count - offset)
+                }
+                if written > 0 {
+                    offset += written
+                    continue
+                }
+                switch errno {
+                case EINTR:
+                    continue
+                case EAGAIN:
+                    // libdispatch sets the master non-blocking when it opens
+                    // the read channel, so a full input queue reports EAGAIN
+                    // rather than blocking. Wait for room, in slices short
+                    // enough that a close is noticed promptly.
+                    var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    _ = poll(&descriptor, 1, 250)
+                    continue
+                default:
+                    // EBADF or EIO: the pty is gone. Nothing more can arrive.
+                    return
+                }
+            }
+        }
+    }
+
+    func close() {
+        lock.lock()
+        closed = true
+        lock.unlock()
+    }
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
 }
