@@ -18,6 +18,8 @@ final class AppModel: ObservableObject {
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
+    /// One subscription per open project, dropped when the project closes.
+    private var projectSubscriptions: [String: AnyCancellable] = [:]
 
     init() {
         agents.pidProvider = { [weak self] in
@@ -225,6 +227,7 @@ final class AppModel: ObservableObject {
     func close(_ project: Project) {
         project.stopAll()
         projects.removeAll { $0.id == project.id }
+        projectSubscriptions[project.id] = nil
         if selection?.project == project.id {
             selection = projects.first?.controllers.first.map(\.ref)
         }
@@ -248,9 +251,8 @@ final class AppModel: ObservableObject {
     /// Child `ObservableObject`s do not propagate through `@Published` arrays,
     /// so republish their changes to keep the sidebar live.
     private func observe(_ project: Project) {
-        project.objectWillChange
+        projectSubscriptions[project.id] = project.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
     }
 
     // MARK: - Session persistence
