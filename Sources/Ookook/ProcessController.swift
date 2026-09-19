@@ -299,9 +299,13 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         var parts: [String]
         switch spec.agentProvider {
         case .codex: parts = [spec.command, "resume", sessionID]
+        case .opencode: parts = [spec.command, "--session", sessionID]
         default: parts = [spec.command, "--resume", sessionID]
         }
-        if let model, !model.isEmpty { parts += ["--model", model] }
+        // opencode's TUI takes no `--model`; the session keeps its own.
+        if spec.agentProvider != .opencode, let model, !model.isEmpty {
+            parts += ["--model", model]
+        }
         commandOverride = parts.joined(separator: " ")
         resumeOffer = nil
         if status.isRunning {
@@ -348,8 +352,9 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// the transcript once there is a conversation to write. Resuming an id
     /// with no transcript fails with "No conversation found" and exit 1, so a
     /// terminal that was opened and never typed into must not be offered as a
-    /// previous session - it would crash on the offer. Codex ids come from
-    /// transcripts already on disk, so they need no check.
+    /// previous session - it would crash on the offer. Codex and opencode ids
+    /// come from transcripts and database rows already on disk, so they need
+    /// no check.
     private func isResumable(sessionID: String) -> Bool {
         guard spec.agentProvider == .claude else { return true }
         let transcript = AgentSessionStore.claudeTranscriptDirectory(for: workingDirectory)
@@ -358,9 +363,10 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         return size > AgentSessionStore.minimumTranscriptBytes
     }
 
-    /// Records a transcript discovered directly on disk. Codex does not keep
-    /// Claude's per-PID session-state files, so its current conversation is
-    /// identified from its most recently updated rollout instead.
+    /// Records a transcript discovered directly on disk. Codex and opencode do
+    /// not keep Claude's per-PID session-state files, so their current
+    /// conversation is identified from the newest session already on disk
+    /// instead.
     func rememberSession(_ session: AgentSessionSummary) {
         guard spec.kind == .agent, !session.id.isEmpty else { return }
         LastSessionStore.record(sessionID: session.id, model: session.model, for: ref)

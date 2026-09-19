@@ -2,20 +2,35 @@ import Combine
 import Darwin
 import Foundation
 
-/// Discovers Claude Code sessions running inside supervised processes and
+/// One supervised process that might be running a coding agent.
+struct AgentTarget {
+    /// The process ref id the sidebar knows this process by.
+    let id: String
+    let pid: pid_t
+    let provider: AgentProvider?
+    /// The directory the process was started in, which is how an opencode
+    /// session is matched to it.
+    let root: URL
+}
+
+/// Discovers the coding-agent sessions running inside supervised processes and
 /// reports what each one is doing and how full its context is.
 ///
-/// A session is found by walking a process's descendants and looking for
-/// `~/.claude/sessions/<pid>.json`. Going pid-first matters: those records are
-/// left behind when a session dies, so enumerating the directory would surface
-/// sessions that ended days ago. Starting from pids we know are alive makes the
-/// staleness question disappear.
+/// Claude Code sessions are found by walking a process's descendants and
+/// looking for `~/.claude/sessions/<pid>.json`. Going pid-first matters: those
+/// records are left behind when a session dies, so enumerating the directory
+/// would surface sessions that ended days ago. Starting from pids we know are
+/// alive makes the staleness question disappear.
+///
+/// opencode keeps no per-PID record at all; its newest session for the process's
+/// directory is the one that process is in, and its database says whether a turn
+/// is in flight.
 @MainActor
 final class AgentMonitor: ObservableObject {
     @Published private(set) var sessions: [String: AgentSession] = [:]
 
-    /// Supplies (process ref id, pid) for everything currently running.
-    var pidProvider: (() -> [(id: String, pid: pid_t)])?
+    /// Supplies everything currently running that might have an agent in it.
+    var agentTargets: (() -> [AgentTarget])?
 
     private var timer: Timer?
     private let queue = DispatchQueue(label: "com.tolga.ookook.agents", qos: .utility)
@@ -41,25 +56,47 @@ final class AgentMonitor: ObservableObject {
     }
 
     private func sample() {
-        guard let targets = pidProvider?(), !targets.isEmpty else {
+        guard let targets = agentTargets?(), !targets.isEmpty else {
             sessions = [:]
             return
         }
         queue.async {
             let children = ProcessTree.childrenByParent()
             var found: [String: AgentSession] = [:]
+            // opencode has no per-PID state file, so it is asked once per
+            // project directory; every opencode process in the same project
+            // shares the answer, which is that project's newest session.
+            var opencodeByDirectory: [String: AgentSession] = [:]
+            var scannedDirectories: Set<String> = []
+
             for target in targets {
-                for pid in ProcessTree.descendants(of: target.pid, children: children) {
-                    if let session = Self.readSession(pid: pid) {
-                        found[target.id] = session
-                        break
-                    }
+                if let session = Self.claudeSession(of: target, children: children) {
+                    found[target.id] = session
+                    continue
+                }
+                guard target.provider == .opencode else { continue }
+                let directory = target.root.standardizedFileURL.path
+                if scannedDirectories.insert(directory).inserted,
+                   let session = OpenCodeSessions.status(projectRoot: target.root) {
+                    opencodeByDirectory[directory] = session
+                }
+                if let session = opencodeByDirectory[directory] {
+                    found[target.id] = session
                 }
             }
             Task { @MainActor [weak self] in
                 self?.apply(found)
             }
         }
+    }
+
+    /// The Claude Code session inside a process's subtree, if there is one.
+    private static func claudeSession(of target: AgentTarget,
+                                      children: [pid_t: [pid_t]]) -> AgentSession? {
+        for pid in ProcessTree.descendants(of: target.pid, children: children) {
+            if let session = readSession(pid: pid) { return session }
+        }
+        return nil
     }
 
     /// Called when an agent's activity changes; carries the process ref id.

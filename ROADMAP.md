@@ -25,7 +25,7 @@ The core loop works and is verified end to end.
 | Live activity line per process | Last line of output, in the sidebar |
 | **MCP server over HTTP** | `list_processes`, `get_process_output`, `start`/`stop`/`restart` |
 
-Claude Code and Codex connect with one command and report `✔ Connected`.
+Claude Code, Codex and opencode connect with one command and report `✔ Connected`.
 
 ---
 

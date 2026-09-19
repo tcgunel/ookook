@@ -125,6 +125,8 @@ struct StatusDot: View {
     var body: some View {
         if provider == .claude, status.isRunning {
             ClaudeMark(isBusy: isBusy)
+        } else if provider == .opencode, status.isRunning {
+            OpenCodeMark(isBusy: isBusy)
         } else {
             Circle()
                 .fill(Color(nsColor: status.tint))
@@ -171,6 +173,52 @@ struct ClaudeMark: View {
         Text(text)
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Self.orange)
+            // Glyphs sit on a text baseline; the dot they replace is centred.
+            .offset(y: -1)
+    }
+}
+
+/// opencode's working mark, in rainbow.
+///
+/// The glyphs are opencode's own quadrant-orbit spinner frames, so the
+/// sidebar animates in the same language as the Mini footer; the colour walks
+/// around the wheel while a turn is in flight. "Working" is the one thing a
+/// terminal tile cannot show from the outside - opencode paints with cursor
+/// positioning and emits almost no newlines - so the mark carries it.
+struct OpenCodeMark: View {
+    var isBusy: Bool
+
+    /// Reduce Motion turns the animation off but not the signal: a still but
+    /// brighter glyph still reads as "working".
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let frames = ["▖", "▘", "▝", "▗"]
+    private static let interval: TimeInterval = 0.16
+    /// Seconds for one trip around the colour wheel.
+    private static let cycle: TimeInterval = 5
+
+    var body: some View {
+        Group {
+            if isBusy, !reduceMotion {
+                TimelineView(.periodic(from: .now, by: Self.interval)) { context in
+                    let tick = context.date.timeIntervalSinceReferenceDate
+                    let hue = (tick / Self.cycle).truncatingRemainder(dividingBy: 1)
+                    glyph(Self.frames[Int(tick / Self.interval) % Self.frames.count],
+                          color: SwiftUI.Color(hue: hue, saturation: 0.8, brightness: 1))
+                }
+            } else if isBusy {
+                glyph("▚", color: .primary)
+            } else {
+                glyph("▚", color: .secondary)
+            }
+        }
+        .frame(width: 8, height: 8)
+    }
+
+    private func glyph(_ text: String, color: SwiftUI.Color) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(color)
             // Glyphs sit on a text baseline; the dot they replace is centred.
             .offset(y: -1)
     }

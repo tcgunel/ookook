@@ -9,9 +9,11 @@ import Foundation
 enum ClaudeLaunchOptions {
     static let skipPermissionsKey = "claudeSkipPermissions"
     static let codexBypassApprovalsAndSandboxKey = "codexBypassApprovalsAndSandbox"
+    static let opencodeAutoApproveKey = "opencodeAutoApprove"
 
     static let skipPermissionsFlag = "--dangerously-skip-permissions"
     static let codexBypassApprovalsAndSandboxFlag = "--yolo"
+    static let opencodeAutoApproveFlag = "--auto"
 
     static var skipsPermissions: Bool {
         // Ookook sessions are meant to run unattended, so an unset preference
@@ -34,13 +36,24 @@ enum ClaudeLaunchOptions {
         return UserDefaults.standard.bool(forKey: codexBypassApprovalsAndSandboxKey)
     }
 
-    /// Adds the flag to a Claude Code command line, if the user asked for it.
+    static var autoApprovesOpencodePermissions: Bool {
+        // Same default as its siblings: an opencode session Ookook starts is
+        // meant to keep going while the user looks elsewhere.
+        guard UserDefaults.standard.object(forKey: opencodeAutoApproveKey) != nil else {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: opencodeAutoApproveKey)
+    }
+
+    /// Adds each provider's own bypass flag to a command line, if the user
+    /// asked for it.
     ///
     /// Applied at launch rather than baked into the stored command, so the
     /// preference reaches sessions that already exist - including resumed ones,
     /// whose command line is rebuilt from the same base - and turning it off
-    /// takes effect the same way. Only commands that actually run `claude` are
-    /// touched: a project's `ookook.yml` may well start something else.
+    /// takes effect the same way. Only commands whose first word is one of the
+    /// known agent executables are touched: a project's `ookook.yml` may well
+    /// start something else.
     static func applied(to command: String) -> String {
         if skipsPermissions,
            !command.contains(skipPermissionsFlag),
@@ -51,6 +64,11 @@ enum ClaudeLaunchOptions {
            !command.contains(codexBypassApprovalsAndSandboxFlag),
            runs(command, executable: "codex") {
             return "\(command) \(codexBypassApprovalsAndSandboxFlag)"
+        }
+        if autoApprovesOpencodePermissions,
+           !command.contains(opencodeAutoApproveFlag),
+           runs(command, executable: "opencode") {
+            return "\(command) \(opencodeAutoApproveFlag)"
         }
         return command
     }

@@ -30,11 +30,13 @@ enum ProcessKind: String, Codable, CaseIterable {
 enum AgentProvider: String, Codable {
     case claude
     case codex
+    case opencode
 
     var displayName: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
+        case .opencode: return "opencode"
         }
     }
 }
@@ -70,6 +72,7 @@ struct ProcessSpec: Codable, Identifiable, Equatable {
         switch URL(fileURLWithPath: executable).lastPathComponent {
         case "claude": return .claude
         case "codex": return .codex
+        case "opencode": return .opencode
         default: return nil
         }
     }

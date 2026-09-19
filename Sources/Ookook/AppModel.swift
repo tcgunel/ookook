@@ -24,8 +24,8 @@ final class AppModel: ObservableObject {
     private var projectSubscriptions: [String: AnyCancellable] = [:]
 
     init() {
-        agents.pidProvider = { [weak self] in
-            self?.runningPIDs() ?? []
+        agents.agentTargets = { [weak self] in
+            self?.runningAgentTargets() ?? []
         }
         agents.onActivityChange = { [weak self] id, previous, current in
             self?.reportAgentTransition(id: id, from: previous, to: current)
@@ -71,6 +71,21 @@ final class AppModel: ObservableObject {
         projects.flatMap { project in
             project.controllers.compactMap { controller in
                 controller.pid.map { (id: controller.ref.id, pid: $0) }
+            }
+        }
+    }
+
+    /// Everything running, with the provider and directory the agent monitor
+    /// needs to find that process's session.
+    private func runningAgentTargets() -> [AgentTarget] {
+        projects.flatMap { project in
+            project.controllers.compactMap { controller in
+                controller.pid.map { pid in
+                    AgentTarget(id: controller.ref.id,
+                                pid: pid,
+                                provider: controller.spec.agentProvider,
+                                root: controller.workingDirectory)
+                }
             }
         }
     }
@@ -335,13 +350,15 @@ final class AppModel: ObservableObject {
                 controller.rememberSession(session)
                 continue
             }
-            // Codex records its rollout on disk but has no per-PID state file
-            // like Claude's ~/.claude/sessions/<pid>.json. The session store
-            // is refreshed regularly while the app runs, so its newest entry
-            // is the right resume target for this live Codex process.
+            // Codex and opencode record their sessions on disk but have no
+            // per-PID state file like Claude's ~/.claude/sessions/<pid>.json.
+            // The session store is refreshed regularly while the app runs, so
+            // its newest entry is the right resume target for this live
+            // process.
             if controller.status.isRunning,
-               controller.spec.agentProvider == .codex,
-               let session = agentSessions.sessions(for: controller.projectID, provider: .codex).first {
+               let provider = controller.spec.agentProvider,
+               provider == .codex || provider == .opencode,
+               let session = agentSessions.sessions(for: controller.projectID, provider: provider).first {
                 controller.rememberSession(session)
             }
         }

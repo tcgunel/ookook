@@ -16,7 +16,8 @@ Milestone 1 (core supervisor) is working:
 - [x] Start / stop / restart, autostart, crash detection with exponential backoff
 - [x] Children inherit your real environment and run under your login shell
 - [x] No orphaned processes when the app quits
-- [ ] MCP server, so Claude Code can see process status and logs (milestone 2)
+- [x] MCP server, so Claude Code, Codex and opencode can see process status and
+      logs (milestone 2)
 - [ ] Log search, split panes, per-process env, icon, updater (milestone 3)
 
 ## Build
@@ -51,6 +52,11 @@ processes:
     type: agent
     autostart: false
 
+  - name: opencode
+    command: opencode
+    type: agent
+    autostart: false
+
   - name: api
     command: php artisan serve
     cwd: ./backend         # relative to this file, or absolute
@@ -64,6 +70,22 @@ Every command runs through your login shell (`$SHELL -l -c`), so `nvm`, `asdf`,
 
 Note the `-i` in the `shell` example: a non-interactive shell exits immediately
 even on a pty, so an interactive shell needs it explicitly.
+
+## Agents
+
+Give a process `type: agent` and Ookook recognises the provider from the
+command - `claude`, `codex` or `opencode`. Agents get a working indicator in
+the sidebar (Claude Code and opencode animate their own spinner, everything
+else a breathing dot) and a Resume menu with the project's recent sessions:
+`claude --resume`, `codex resume`, `opencode --session`. opencode's session
+history is read read-only from its own SQLite database.
+
+Ookook also starts agents unattended by default, appending each provider's own
+flag: `--dangerously-skip-permissions` for Claude Code, `--yolo` for Codex and
+`--auto` for opencode. Turn any of them off under Settings › Ookook.
+
+Every agent can connect to Ookook's MCP server; the copy button in the sidebar
+footer has the exact command for whichever one you use.
 
 ## Distribution note
 

@@ -34,13 +34,19 @@ struct AgentSessionSummary: Identifiable, Equatable {
         switch provider {
         case .claude: parts = [base, "--resume", id]
         case .codex: parts = [base, "resume", id]
+        case .opencode: parts = [base, "--session", id]
         }
-        if let model, !model.isEmpty { parts += ["--model", model] }
+        // opencode's TUI takes no `--model`; a resumed session continues on the
+        // model stored with it, so there is nothing to pass back.
+        if provider != .opencode, let model, !model.isEmpty {
+            parts += ["--model", model]
+        }
         return parts.joined(separator: " ")
     }
 }
 
-/// Finds the transcripts Claude Code and Codex keep for a project.
+/// Finds the transcripts and session databases Claude Code, Codex and opencode
+/// keep for a project.
 ///
 /// Reads only the ends of each file: transcripts run to tens of megabytes, and
 /// loading one to show a menu label would stall the UI for seconds.
@@ -78,7 +84,8 @@ final class AgentSessionStore: ObservableObject {
         Task.detached(priority: .utility) {
             let claude = Self.scanClaude(Self.claudeTranscriptDirectory(for: root))
             let codex = Self.scanCodex(projectRoot: root)
-            let found = (claude + codex)
+            let opencode = OpenCodeSessions.summaries(projectRoot: root, limit: Self.maxSessions)
+            let found = (claude + codex + opencode)
                 .sorted { $0.modified > $1.modified }
                 .prefix(Self.maxSessions)
             await MainActor.run {

@@ -2,8 +2,8 @@ import Foundation
 
 /// Exposes the running workspace to AI agents over MCP.
 ///
-/// Transport is JSON-RPC over HTTP on loopback, so Claude Code and Codex can
-/// connect directly to the app without a helper binary.
+/// Transport is JSON-RPC over HTTP on loopback, so Claude Code, Codex and
+/// opencode can connect directly to the app without a helper binary.
 @MainActor
 final class MCPServer: ObservableObject {
     nonisolated static let defaultPort: UInt16 = 4517
@@ -52,6 +52,13 @@ final class MCPServer: ObservableObject {
     var codexConnectCommand: String? {
         guard let port else { return nil }
         return "codex mcp add ookook --url http://127.0.0.1:\(port)/mcp"
+    }
+
+    /// opencode registers remote MCP servers through its own config, scoped to
+    /// the project it is run in unless `--global` is passed.
+    var opencodeConnectCommand: String? {
+        guard let port else { return nil }
+        return "opencode mcp add ookook --url http://127.0.0.1:\(port)/mcp"
     }
 
     /// A per-project endpoint, for an agent that should always mean one project.

@@ -19,7 +19,10 @@ let package = Package(
             // SwiftTerm's view layer is main-thread-confined AppKit written against
             // the Swift 5 concurrency model; pin the language mode rather than fight
             // strict-concurrency diagnostics across the dependency boundary.
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            // opencode keeps its session history in a SQLite database; reading it
+            // for the Resume menu needs the system library and nothing more.
+            linkerSettings: [.linkedLibrary("sqlite3")]
         )
     ]
 )

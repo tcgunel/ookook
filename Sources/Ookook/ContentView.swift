@@ -276,6 +276,7 @@ private struct ProjectSection: View {
                 HStack(spacing: 8) {
                     Button("Add Claude Code") { project.add(.claudeAgent()) }
                     Button("Add Codex") { project.add(.codexAgent()) }
+                    Button("Add opencode") { project.add(.opencodeAgent()) }
                 }
                 .buttonStyle(.link)
                 .font(.caption)
@@ -330,6 +331,7 @@ private struct ProjectSection: View {
             .contextMenu {
                 Button("Add Claude Code") { project.add(.claudeAgent()) }
                 Button("Add Codex") { project.add(.codexAgent()) }
+                Button("Add opencode") { project.add(.opencodeAgent()) }
                 Button("Add Terminal") { project.add(.shell()) }
                 Button("Add Command…") { addingCommand = true }
                 Menu("New SSH Session") {

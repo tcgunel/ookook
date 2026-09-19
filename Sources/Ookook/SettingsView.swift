@@ -411,6 +411,8 @@ private struct OokookPreferencesTab: View {
     @AppStorage(ClaudeLaunchOptions.skipPermissionsKey) private var skipPermissions: Bool = true
     @AppStorage(ClaudeLaunchOptions.codexBypassApprovalsAndSandboxKey)
     private var bypassCodexApprovalsAndSandbox: Bool = true
+    @AppStorage(ClaudeLaunchOptions.opencodeAutoApproveKey)
+    private var autoApproveOpencodePermissions: Bool = true
 
     var body: some View {
         Form {
@@ -427,6 +429,14 @@ private struct OokookPreferencesTab: View {
                        isOn: $bypassCodexApprovalsAndSandbox)
                 Text("Codex runs without asking and with unrestricted system access. "
                      + "Enable only in a workspace you fully trust. Applies to sessions started from now on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("opencode") {
+                Toggle("Auto-approve permissions (--auto)",
+                       isOn: $autoApproveOpencodePermissions)
+                Text("opencode runs every tool call that is not explicitly denied. "
+                     + "Applies to sessions started from now on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

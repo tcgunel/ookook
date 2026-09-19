@@ -39,6 +39,7 @@ struct MCPStatusBar: View {
                     Menu {
                         Button("Copy Claude Code command") { copy(mcp.claudeConnectCommand) }
                         Button("Copy Codex command") { copy(mcp.codexConnectCommand) }
+                        Button("Copy opencode command") { copy(mcp.opencodeConnectCommand) }
                     } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 10))
