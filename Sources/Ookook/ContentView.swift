@@ -124,6 +124,7 @@ struct ContentView: View {
                                agents: app.agents,
                                git: app.git,
                                layout: app.layout,
+                               tickets: app.tickets,
                                onClose: { app.close(project) },
                                position: app.projectPosition(project.id),
                                onMove: { app.moveProject(project.id, by: $0) },
@@ -226,6 +227,7 @@ private struct ProjectSection: View {
     @ObservedObject var agents: AgentMonitor
     @ObservedObject var git: GitMonitor
     @ObservedObject var layout: SidebarLayoutStore
+    @ObservedObject var tickets: TicketsWorker
     let onClose: () -> Void
     /// Sidebar order. Projects are a flat list the user arranges by hand, so
     /// moving one is a project-level command, not something a process drag can
@@ -248,7 +250,9 @@ private struct ProjectSection: View {
     private func openSSHSettings() {
         SettingsWindowController.shared.show(projectRoot: project.rootURL,
                                              ssh: ssh,
-                                             projects: [(id: project.id, name: project.name)])
+                                             tickets: tickets,
+                                             projects: [(id: project.id, name: project.name)],
+                                             selectedProject: project.id)
     }
     @State private var addingCommand = false
 
@@ -277,6 +281,12 @@ private struct ProjectSection: View {
                                  agents: agents,
                                  layout: layout,
                                  onRename: { renaming = $0 })
+            }
+            if tickets.configs.config(for: project.id).enabled {
+                TicketsSidebarSection(worker: tickets,
+                                      projectID: project.id,
+                                      projectName: project.name,
+                                      onOpenSettings: { openSSHSettings() })
             }
         } header: {
             HStack(spacing: 6) {

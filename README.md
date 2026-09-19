@@ -80,3 +80,31 @@ yet in this keychain (only App Store and Development certs are).
 
 - [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm) - terminal emulator and pty handling
 - [Yams](https://github.com/jpsim/Yams) - YAML parsing
+
+## Tickets (WhatsApp → DeepSeek → GitHub Issues)
+
+Ookook can read the WhatsApp desktop app's local database, classify new
+messages from chosen coworkers with DeepSeek, and file them as GitHub issues
+on a label-based board: `triage` (needs your approval) → `todo` → `in-progress`
+→ closed. Follow-ups and "fixed it" messages in chat land as comments on the
+matching issue. Everything is redacted before it leaves the machine.
+
+Configure it per project in Settings › Tickets: the chats to read, the repos
+(with local clones for a file map), a DeepSeek key (Keychain; a shared key is
+the fallback), and options such as auto-approving confident bug/feature
+tickets, ignoring types, active hours and screenshot OCR. Ookook needs Full
+Disk Access to read the WhatsApp database; the pane has a button for it.
+
+The sidebar shows a Tickets group under each enabled project. Hover a row for
+approve/close, double-click to open on GitHub. Claude Code gets three MCP
+tools: `list_tickets`, `claim_ticket` (moves to in-progress, returns body and
+comments and a `ticket/N-slug` branch name) and `finish_ticket` (comment, then
+close / leave for the PR / send back to triage).
+
+Headless checks, using the same settings as the app:
+
+```bash
+./Ookook.app/Contents/MacOS/Ookook tickets list-chats
+./Ookook.app/Contents/MacOS/Ookook tickets backtest --project /path/to/project --from 2026-04-20 --to 2026-04-25
+./Ookook.app/Contents/MacOS/Ookook tickets redact-test --project /path/to/project --hours 24
+```

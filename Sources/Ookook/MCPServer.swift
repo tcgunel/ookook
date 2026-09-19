@@ -193,6 +193,44 @@ final class MCPServer: ObservableObject {
             ],
             named("restart_process",
                   "Restart a process - the usual way to pick up a config change or clear a wedged dev server."),
+            [
+                "name": "list_tickets",
+                "description": "List the project's ticket board (GitHub issues filed from WhatsApp by Ookook). Columns are labels: triage (needs human approval - never work these), todo (approved, ready), in-progress. Only type:bug and type:feature tickets are code work. Returns ref, title, shop, type, priority and body.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "project": projectArgument,
+                        "column": ["type": "string", "description": "triage, todo or in-progress (default todo)."],
+                        "include_body": ["type": "boolean", "description": "Include the full issue body (default true)."],
+                    ],
+                ],
+            ],
+            [
+                "name": "claim_ticket",
+                "description": "Start working a todo ticket: moves it to in-progress and returns its body, comments and the branch name to use (ticket/N-slug). Refuses triage tickets.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "project": projectArgument,
+                        "ref": ["type": "string", "description": "Issue reference, e.g. owner/name#42, or just the number for the default repo."],
+                    ],
+                    "required": ["ref"],
+                ],
+            ],
+            [
+                "name": "finish_ticket",
+                "description": "Finish a ticket: leaves a comment (say what was done and the PR link) and either closes it or sends it back to triage with a question when it is unclear.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "project": projectArgument,
+                        "ref": ["type": "string", "description": "Issue reference or number."],
+                        "comment": ["type": "string", "description": "What was done, or the question for the human."],
+                        "outcome": ["type": "string", "description": "done (close the issue), pr (leave open with in-progress; merging the PR closes it), or unclear (back to triage)."],
+                    ],
+                    "required": ["ref", "comment"],
+                ],
+            ],
         ]
     }
 
@@ -406,9 +444,92 @@ final class MCPServer: ObservableObject {
             controller.restart()
             return "Restarted \(controller.spec.name)."
 
+        case "list_tickets":
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let column = (arguments["column"] as? String)?.lowercased() ?? "todo"
+            let includeBody = arguments["include_body"] as? Bool ?? true
+            let (client, config) = try ticketsClient(for: project, in: app)
+            var issues: [TicketIssue] = []
+            for repo in config.repos {
+                issues += try await client.boardIssues(repo: repo.repo, lookbackDays: 0).filter { !$0.isClosed }
+            }
+            let wanted = issues.filter { $0.column == column }
+                .sorted { a, b in a.isHighPriority != b.isHighPriority ? a.isHighPriority : a.number < b.number }
+            guard !wanted.isEmpty else { return "No tickets in \(column)." }
+            return wanted.map { issue in
+                var row = "- \(issue.ref) [\(issue.type ?? "?")\(issue.isHighPriority ? ", high" : "")] \(issue.title)"
+                row += "\n    shop: \(issue.shop ?? "unknown") · url: \(issue.url) · comments: \(issue.comments)"
+                if includeBody { row += "\n" + issue.body.split(separator: "\n").map { "    " + $0 }.joined(separator: "\n") }
+                return row
+            }.joined(separator: "\n")
+
+        case "claim_ticket":
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let (client, config) = try ticketsClient(for: project, in: app)
+            let (repo, number) = try ticketRef(arguments["ref"], config: config)
+            let issue = try await client.issue(repo: repo, number: number)
+            if issue.labels.contains("triage") {
+                throw ToolError.message("\(issue.ref) is still in triage; a human has to move it to todo first.")
+            }
+            try await client.move(repo: repo, number: number, to: "in-progress")
+            let comments = try await client.comments(repo: repo, number: number)
+            let slug = issue.shortTitle.lowercased()
+                .map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
+                .split(separator: "-").filter { !$0.isEmpty }.prefix(5).joined(separator: "-")
+            await app.tickets.refreshIssues(project.id)
+            var out = "Claimed \(issue.ref): \(issue.title)\nBranch: ticket/\(number)-\(slug)\nURL: \(issue.url)\n\n\(issue.body)"
+            if !comments.isEmpty {
+                out += "\n\n--- Comments ---\n" + comments.joined(separator: "\n\n")
+            }
+            return out
+
+        case "finish_ticket":
+            let project = try resolveProject(arguments: arguments, pinnedSlug: pinnedSlug, in: app)
+            let (client, config) = try ticketsClient(for: project, in: app)
+            let (repo, number) = try ticketRef(arguments["ref"], config: config)
+            guard let comment = arguments["comment"] as? String, !comment.isEmpty else {
+                throw ToolError.message("A `comment` argument is required.")
+            }
+            let outcome = (arguments["outcome"] as? String)?.lowercased() ?? "done"
+            try await client.comment(repo: repo, number: number, body: Redactor.redact(comment))
+            switch outcome {
+            case "unclear":
+                try await client.move(repo: repo, number: number, to: "triage")
+            case "pr":
+                break
+            default:
+                try await client.setState(repo: repo, number: number, closed: true)
+            }
+            await app.tickets.refreshIssues(project.id)
+            return "\(repo)#\(number): \(outcome == "unclear" ? "sent back to triage" : outcome == "pr" ? "comment added, left in progress" : "closed")."
+
         default:
             throw ToolError.message("Unknown tool: \(name)")
         }
+    }
+
+    private func ticketsClient(for project: Project, in app: AppModel) throws -> (GitHubClient, TicketsProjectConfig) {
+        let config = app.ticketsConfig.config(for: project.id)
+        guard !config.repos.isEmpty else {
+            throw ToolError.message("\(project.name) has no ticket repositories. Configure them in Ookook › Settings › Tickets.")
+        }
+        guard let token = GitHubClient.resolveToken(projectID: project.id) else {
+            throw ToolError.message(GitHubError.noToken.localizedDescription)
+        }
+        return (GitHubClient(token: token), config)
+    }
+
+    /// "owner/name#12" or "12" (default repo) or "#12".
+    private func ticketRef(_ raw: Any?, config: TicketsProjectConfig) throws -> (String, Int) {
+        let text: String
+        if let s = raw as? String { text = s.trimmingCharacters(in: .whitespaces) }
+        else if let n = raw as? Int { text = String(n) }
+        else { throw ToolError.message("A `ref` argument is required.") }
+        if let split = GitHubBoard.split(text) { return split }
+        if let n = Int(text.trimmingCharacters(in: CharacterSet(charactersIn: "#"))), let repo = config.repos.first?.repo {
+            return (repo, n)
+        }
+        throw ToolError.message("Cannot parse ticket reference \"\(text)\". Use owner/name#N.")
     }
 
     private func controller(named name: Any?, in workspace: Project) throws -> ProcessController {

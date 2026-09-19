@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     let localProcesses = LocalProcessStore()
     let ssh = SSHConnectionStore()
     let agentSessions = AgentSessionStore()
+    let ticketsConfig = TicketsConfigStore()
+    private(set) lazy var tickets = TicketsWorker(configs: ticketsConfig)
     private(set) lazy var mcp: MCPServer = MCPServer(app: self)
 
     private var cancellables: [AnyCancellable] = []
@@ -244,6 +246,7 @@ final class AppModel: ObservableObject {
     }
 
     private func syncGitWatchList() {
+        tickets.projectNames = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0.name) })
         git.watch(projects.map { (id: $0.id, root: $0.rootURL) })
         agentSessions.refresh(projects: projects.map { (id: $0.id, root: $0.rootURL) })
     }
@@ -289,6 +292,7 @@ final class AppModel: ObservableObject {
         git.start()
         startScrollbackSnapshots()
         startSessionRefresh()
+        tickets.start()
     }
 
     /// A SIGTERM - which is what `pkill`, a crash, or a forced logout sends -
@@ -354,6 +358,7 @@ final class AppModel: ObservableObject {
         scrollbackTimer = nil
         sessionTimer?.invalidate()
         sessionTimer = nil
+        tickets.stop()
         git.stop()
         agents.stop()
         resources.stop()

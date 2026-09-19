@@ -155,7 +155,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         SettingsWindowController.shared.show(
             projectRoot: root,
             ssh: app.ssh,
-            projects: app.projects.map { (id: $0.id, name: $0.name) })
+            tickets: app.tickets,
+            projects: app.projects.map { (id: $0.id, name: $0.name) },
+            selectedProject: app.selection?.project)
     }
 
     @objc private func toggleSound(_ sender: NSMenuItem) {

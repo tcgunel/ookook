@@ -20,11 +20,14 @@ final class SettingsWindowController {
     ///   project tabs rather than guessing.
     func show(projectRoot: URL?,
               ssh: SSHConnectionStore,
-              projects: [(id: String, name: String)]) {
+              tickets: TicketsWorker,
+              projects: [(id: String, name: String)],
+              selectedProject: String? = nil) {
         store.setProjectRoot(projectRoot)
         store.reload()
 
-        let root = SettingsView(store: store, ssh: ssh, projects: projects)
+        let root = SettingsView(store: store, ssh: ssh, tickets: tickets, projects: projects,
+                                selectedProject: selectedProject)
         if let window {
             // Rebuild the hosted view: which project is selected, and which
             // projects exist at all, can both have changed since last time.

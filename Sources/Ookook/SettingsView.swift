@@ -9,8 +9,11 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var store: ClaudeConfigStore
     @ObservedObject var ssh: SSHConnectionStore
+    let tickets: TicketsWorker
     /// For scoping a connection to one project.
     let projects: [(id: String, name: String)]
+    /// The project selected in the main window, preselected in project-scoped tabs.
+    var selectedProject: String? = nil
 
     var body: some View {
         TabView {
@@ -22,6 +25,8 @@ struct SettingsView: View {
                 .tabItem { Label("MCP", systemImage: "server.rack") }
             SSHSettingsView(store: ssh, projects: projects)
                 .tabItem { Label("SSH", systemImage: "network") }
+            TicketsSettingsTab(worker: tickets, projects: projects, initialProject: selectedProject)
+                .tabItem { Label("Tickets", systemImage: "checklist") }
             TerminalAppearanceTab()
                 .tabItem { Label("Terminal", systemImage: "terminal") }
             OokookPreferencesTab()

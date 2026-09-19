@@ -7,6 +7,9 @@ import SwiftUI
 // NSHostingView.
 //
 // `delegate` is a global so it stays alive - NSApplication holds its delegate weakly.
+// `Ookook tickets ...` runs the ticket pipeline headless and exits.
+if TicketsCLI.runIfRequested() { exit(0) }
+
 let application = NSApplication.shared
 let delegate = MainActor.assumeIsolated { AppDelegate() }
 application.delegate = delegate

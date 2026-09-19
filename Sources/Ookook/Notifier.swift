@@ -51,6 +51,11 @@ final class Notifier {
              sound: "Basso")
     }
 
+    /// The ticket pipeline filed something new.
+    func ticketCreated(title: String, body: String) {
+        post(title: title, body: body, sound: "Pop")
+    }
+
     /// Number of agents waiting, shown on the Dock icon.
     func updateBadge(waiting: Int) {
         NSApp.dockTile.badgeLabel = waiting > 0 ? String(waiting) : nil
