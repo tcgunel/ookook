@@ -41,6 +41,11 @@ struct ContentView: View {
         .onChange(of: gridSize) { app.gridColumnCount = liveColumnCount }
         .onChange(of: gridColumns) { app.gridColumnCount = liveColumnCount }
         .onAppear { app.gridColumnCount = liveColumnCount }
+        // Every toolbar item is always present; ones that do not apply are
+        // disabled rather than removed. Items that came and went with the view
+        // mode and the selection made SwiftUI rebuild the window's NSToolbar
+        // over and over, and after enough of that the buttons still drew and
+        // highlighted on hover but no longer received clicks.
         .toolbar {
             ToolbarItemGroup {
                 Picker("View", selection: Binding(get: { mode }, set: { mode = $0 })) {
@@ -50,49 +55,52 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .help("Single pane or grid of every process")
 
-                if mode == .grid {
-                    Button {
-                        gridTileHeight = GridView.fittingHeight(
-                            tiles: app.visibleControllers.count,
-                            columns: gridColumns,
-                            in: gridSize)
-                    } label: {
-                        Image(systemName: "arrow.down.right.and.arrow.up.left")
-                    }
-                    .help("Fit every tile in the window")
-                    .disabled(gridSize == .zero || app.visibleControllers.isEmpty)
-
-                    Picker("Columns", selection: $gridColumns) {
-                        Text("Auto").tag(0)
-                        Text("1").tag(1)
-                        Text("2").tag(2)
-                        Text("3").tag(3)
-                        Text("4").tag(4)
-                        Text("5").tag(5)
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 80)
-                    .help("How many tiles per row")
+                Button {
+                    gridTileHeight = GridView.fittingHeight(
+                        tiles: app.visibleControllers.count,
+                        columns: gridColumns,
+                        in: gridSize)
+                } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
                 }
+                .help("Fit every tile in the window")
+                .disabled(mode != .grid || gridSize == .zero || app.visibleControllers.isEmpty)
 
-                Divider()
-
-                if let selected = app.selectedController {
-                    Button {
-                        selected.status.isRunning ? selected.stop() : selected.start()
-                    } label: {
-                        Image(systemName: selected.status.isRunning ? "stop.fill" : "play.fill")
-                    }
-                    .help(selected.status.isRunning ? "Stop \(selected.spec.name)" : "Start \(selected.spec.name)")
-
-                    Button { selected.restart() } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .help("Restart \(selected.spec.name)")
-
-                    Divider()
+                Picker("Columns", selection: $gridColumns) {
+                    Text("Auto").tag(0)
+                    Text("1").tag(1)
+                    Text("2").tag(2)
+                    Text("3").tag(3)
+                    Text("4").tag(4)
+                    Text("5").tag(5)
                 }
+                .pickerStyle(.menu)
+                .frame(width: 80)
+                .help("How many tiles per row")
+                .disabled(mode != .grid)
+            }
 
+            ToolbarItemGroup {
+                let selected = app.selectedController
+                let isRunning = selected?.status.isRunning ?? false
+                Button {
+                    guard let selected else { return }
+                    isRunning ? selected.stop() : selected.start()
+                } label: {
+                    Image(systemName: isRunning ? "stop.fill" : "play.fill")
+                }
+                .help(selected.map { isRunning ? "Stop \($0.spec.name)" : "Start \($0.spec.name)" }
+                      ?? "Select a process to start or stop it")
+                .disabled(selected == nil)
+
+                Button { selected?.restart() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help(selected.map { "Restart \($0.spec.name)" } ?? "Select a process to restart it")
+                .disabled(selected == nil)
+            }
+
+            ToolbarItemGroup {
                 Button { app.startAll() } label: { Image(systemName: "play.circle") }
                     .help("Start everything, in every project")
                 Button { app.stopAll() } label: { Image(systemName: "stop.circle") }
