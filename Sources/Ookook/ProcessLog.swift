@@ -9,7 +9,13 @@ import Foundation
 final class ProcessLog {
     private let maxLines: Int
     private var lines: [String] = []
-    private var partial = ""
+    /// Bytes received since the last line break, held as raw UTF-8. Working in
+    /// bytes rather than `String` matters: this runs on the main thread for
+    /// every pty read, and a TUI that redraws with cursor positioning emits
+    /// almost no newlines, so the pending buffer is rescanned on each chunk.
+    /// Grapheme-aware `String` scans made that the most expensive thing the app
+    /// did while agents were busy.
+    private var partial: [UInt8] = []
     private let lock = NSLock()
 
     /// Most recent complete line with visible content, for the sidebar subtitle.
@@ -20,22 +26,29 @@ final class ProcessLog {
     }
 
     func append(_ bytes: ArraySlice<UInt8>) {
-        guard let chunk = String(bytes: bytes, encoding: .utf8) else { return }
+        guard !bytes.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
 
-        partial += chunk
-        // Carriage returns are progress-bar redraws, not new lines; keep only
-        // the final state of the line so spinners do not flood the log.
-        partial = partial.replacingOccurrences(of: "\r\n", with: "\n")
-        while let newline = partial.firstIndex(of: "\n") {
-            let raw = String(partial[partial.startIndex..<newline])
-            partial = String(partial[partial.index(after: newline)...])
-            let line = Self.strippingControlSequences(raw)
-            lines.append(line)
-            if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                lastActivity = line.trimmingCharacters(in: .whitespaces)
+        partial.append(contentsOf: bytes)
+
+        var lineStart = 0
+        var index = 0
+        while index < partial.count {
+            guard partial[index] == 0x0A else {
+                index += 1
+                continue
             }
+            // A "\r\n" is one break, not a carriage return inside the line -
+            // progress-bar redraws must not reach the sidebar as text.
+            var lineEnd = index
+            if lineEnd > lineStart, partial[lineEnd - 1] == 0x0D { lineEnd -= 1 }
+            append(line: partial[lineStart..<lineEnd])
+            lineStart = index + 1
+            index += 1
+        }
+        if lineStart > 0 {
+            partial.removeFirst(lineStart)
         }
         if lines.count > maxLines {
             lines.removeFirst(lines.count - maxLines)
@@ -43,7 +56,28 @@ final class ProcessLog {
         // A long line with no newline yet (a prompt, a progress bar) still counts
         // as activity, but must not be allowed to grow unbounded.
         if partial.count > 8_192 {
-            partial = String(partial.suffix(4_096))
+            partial.removeFirst(partial.count - 4_096)
+        }
+    }
+
+    /// Records one complete line. Control sequences are only stripped when the
+    /// line has any: most lines are plain text, and skipping the scan for those
+    /// is the common case.
+    private func append(line bytes: ArraySlice<UInt8>) {
+        guard !bytes.isEmpty else {
+            lines.append("")
+            return
+        }
+        // Every byte of a multi-byte UTF-8 sequence is 0x80 or above, so a byte
+        // below 0x20 is always a control character - and a plain text line has
+        // none of those beyond the tab the loop below keeps.
+        let needsStripping = bytes.contains { $0 == 0x1B || ($0 < 0x20 && $0 != 0x09) }
+        let text = String(decoding: bytes, as: UTF8.self)
+        let line = needsStripping ? Self.strippingControlSequences(text) : text
+        lines.append(line)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
+            lastActivity = trimmed
         }
     }
 
@@ -58,7 +92,7 @@ final class ProcessLog {
         lock.lock()
         defer { lock.unlock() }
         lines.removeAll()
-        partial = ""
+        partial.removeAll()
         lastActivity = nil
     }
 

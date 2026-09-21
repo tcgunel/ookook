@@ -110,7 +110,11 @@ final class AgentMonitor: ObservableObject {
                 onActivityChange?(id, previous, session.activity)
             }
         }
-        sessions = found
+        // Sampling runs every few seconds whether or not anything moved, and an
+        // unchanged dictionary assigned back is not free: `@Published` fires
+        // regardless of equality, which re-renders every sidebar row that shows
+        // a session.
+        if sessions != found { sessions = found }
         Notifier.shared.updateBadge(waiting: found.values.filter { $0.activity.needsAttention }.count)
     }
 

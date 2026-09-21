@@ -61,6 +61,34 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
     /// Last line of output with visible content, shown under the name in the sidebar.
     @Published private(set) var activity: String?
 
+    /// Repaints the sidebar line at most this often.
+    ///
+    /// The subtitle is a glanceable summary, and the cost of changing it is
+    /// not the text: it is the SwiftUI invalidation that follows, which walks
+    /// the whole window's layout and constraints. A chatty dev server or a
+    /// repainting TUI produces output far faster than anyone can read it, so
+    /// the refresh is rate-limited rather than run per output chunk -
+    /// otherwise the app's cost scales with the noisiest process instead of
+    /// with what is on screen.
+    private static let activityThrottle: TimeInterval = 0.25
+    private var activityRefreshScheduled = false
+
+    /// Coalesces activity changes into at most one sidebar update per throttle
+    /// window, and only when the line actually changed.
+    private func scheduleActivityRefresh() {
+        guard !activityRefreshScheduled else { return }
+        activityRefreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.activityThrottle) { [weak self] in
+            guard let self else { return }
+            self.activityRefreshScheduled = false
+            // `@Published` fires on every assignment regardless of equality, so
+            // a repainting TUI would still invalidate the row on every tick.
+            let activity = self.terminalView.log.lastActivity
+            guard activity != self.activity else { return }
+            self.activity = activity
+        }
+    }
+
     var log: ProcessLog { terminalView.log }
 
     /// PID of the shell we launched, while it is running. Resource sampling walks
@@ -121,8 +149,7 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
         TerminalAppearance.apply(to: view)
         view.onActivity = { [weak self] in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.activity = self.terminalView.log.lastActivity
+                self?.scheduleActivityRefresh()
             }
         }
     }
