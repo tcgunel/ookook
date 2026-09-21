@@ -66,9 +66,26 @@ enum TerminalAppearance {
         static let fontName = "terminalFontName"
         static let fontSize = "terminalFontSize"
         static let theme = "terminalTheme"
+        static let caretGlide = "terminalCaretGlide"
+        static let lineFade = "terminalLineFade"
     }
 
     static let defaultSize: Double = 13
+
+    /// How long the caret takes to glide between cells, and how long a line
+    /// takes to fade in. Short: this is polish, not an effect.
+    private static let caretGlideDuration: TimeInterval = 0.075
+    private static let lineFadeDuration: TimeInterval = 0.16
+
+    /// Both are on for a new install - the app should feel finished out of the
+    /// box - and either can be turned off under Settings > Terminal.
+    static var caretGlide: Bool {
+        UserDefaults.standard.object(forKey: Key.caretGlide) as? Bool ?? true
+    }
+
+    static var lineFade: Bool {
+        UserDefaults.standard.object(forKey: Key.lineFade) as? Bool ?? true
+    }
 
     static var fontName: String {
         UserDefaults.standard.string(forKey: Key.fontName) ?? ""
@@ -110,6 +127,8 @@ enum TerminalAppearance {
         view.nativeBackgroundColor = NSColor(hex: theme.background)
         view.nativeForegroundColor = NSColor(hex: theme.foreground)
         view.caretColor = NSColor(hex: theme.cursor)
+        view.caretGlideDuration = caretGlide ? caretGlideDuration : 0
+        view.lineFadeInDuration = lineFade ? lineFadeDuration : 0
     }
 
     /// Called by the settings pane after a change.

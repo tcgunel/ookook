@@ -474,6 +474,8 @@ private struct TerminalAppearanceTab: View {
     @AppStorage(TerminalAppearance.Key.fontName) private var fontName: String = ""
     @AppStorage(TerminalAppearance.Key.fontSize) private var fontSize: Double = TerminalAppearance.defaultSize
     @AppStorage(TerminalAppearance.Key.theme) private var themeID: String = TerminalTheme.system.id
+    @AppStorage(TerminalAppearance.Key.caretGlide) private var caretGlide: Bool = true
+    @AppStorage(TerminalAppearance.Key.lineFade) private var lineFade: Bool = true
 
     private let families = TerminalAppearance.availableFonts
 
@@ -505,6 +507,13 @@ private struct TerminalAppearanceTab: View {
                 ThemePreview(theme: TerminalTheme.theme(id: themeID),
                              font: TerminalAppearance.font)
             }
+
+            Section("Motion") {
+                Toggle("Smooth caret", isOn: $caretGlide)
+                    .help("The cursor glides between cells as you type. Jumps elsewhere on the screen stay instant.")
+                Toggle("Fade in new lines", isOn: $lineFade)
+                    .help("Completed lines fade in, for shells and other line-at-a-time output. Full-screen apps and floods of output are left alone.")
+            }
         }
         .formStyle(.grouped)
         .padding(16)
@@ -513,6 +522,8 @@ private struct TerminalAppearanceTab: View {
         .onChange(of: fontName) { TerminalAppearance.broadcast() }
         .onChange(of: fontSize) { TerminalAppearance.broadcast() }
         .onChange(of: themeID) { TerminalAppearance.broadcast() }
+        .onChange(of: caretGlide) { TerminalAppearance.broadcast() }
+        .onChange(of: lineFade) { TerminalAppearance.broadcast() }
     }
 }
 
