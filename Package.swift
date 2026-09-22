@@ -5,12 +5,13 @@ let package = Package(
     name: "Ookook",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // Pinned to a fork, which carries two changes the 1.18 release line does
-        // not: repaints paced at the screen's refresh rate rather than a fixed
-        // 16.67ms (upstream master replaced that scheduler with a display-link
-        // frame loop, so this pin can go once a release contains it), and the
-        // opt-in caret glide and line fade the terminal settings drive.
-        .package(url: "https://github.com/tcgunel/SwiftTerm", revision: "3a30693ce221b1188ee190da1f3f97099dad0c52"),
+        // Pinned to a fork, which carries three changes the 1.18 release line
+        // does not: repaints paced at the screen's refresh rate rather than a
+        // fixed 16.67ms (upstream master replaced that scheduler with a
+        // display-link frame loop, so that one can go once a release contains
+        // it), the opt-in caret glide and line fade the terminal settings
+        // drive, and repainting only the rows whose content changed.
+        .package(url: "https://github.com/tcgunel/SwiftTerm", revision: "996ef4d9ede58dcd6983a9d978f8071bc41d8137"),
         .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
     ],
     targets: [
