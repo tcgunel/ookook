@@ -11,7 +11,7 @@ let package = Package(
         // display-link frame loop, so that one can go once a release contains
         // it), the opt-in caret glide and line fade the terminal settings
         // drive, and repainting only the rows whose content changed.
-        .package(url: "https://github.com/tcgunel/SwiftTerm", revision: "996ef4d9ede58dcd6983a9d978f8071bc41d8137"),
+        .package(url: "https://github.com/tcgunel/SwiftTerm", revision: "69176e5cda1b685c6c62615f4bca6af6e3c7dc87"),
         .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
     ],
     targets: [
