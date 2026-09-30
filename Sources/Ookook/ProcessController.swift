@@ -530,6 +530,14 @@ final class ProcessController: NSObject, ObservableObject, Identifiable {
             env.removeValue(forKey: key)
         }
 
+        // Debug instrumentation is not part of the user's environment. If this
+        // app was launched with malloc stack logging (to trace its own memory
+        // use), a shell or agent that inherited the variable would carry the
+        // cost of debugging Ookook, and hand it on to everything it spawns.
+        for key in env.keys where key.hasPrefix("MallocStackLogging") {
+            env.removeValue(forKey: key)
+        }
+
         // Lets a process (or an agent running in one) know which project and
         // process it is, without having to be told.
         env["OOKOOK_PROJECT"] = projectID
