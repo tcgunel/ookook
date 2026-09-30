@@ -35,9 +35,15 @@ final class AgentMonitor: ObservableObject {
     private var timer: Timer?
     private let queue = DispatchQueue(label: "com.tolga.ookook.agents", qos: .utility)
 
-    private static let sessionsDirectory = FileManager.default
+    /// Parsed transcript tails and sub-agent titles, kept until a file actually
+    /// changes. The scan runs every few seconds and a workflow sweep leaves
+    /// hundreds of transcripts in the tree; re-reading them all each tick was
+    /// the app's single most expensive habit.
+    private nonisolated let transcripts = TranscriptCache()
+
+    nonisolated private static let sessionsDirectory = FileManager.default
         .homeDirectoryForCurrentUser.appendingPathComponent(".claude/sessions")
-    private static let projectsDirectory = FileManager.default
+    nonisolated private static let projectsDirectory = FileManager.default
         .homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
 
     func start(interval: TimeInterval = 3) {
@@ -60,7 +66,8 @@ final class AgentMonitor: ObservableObject {
             sessions = [:]
             return
         }
-        queue.async {
+        queue.async { [weak self] in
+            guard let self else { return }
             let children = ProcessTree.childrenByParent()
             var found: [String: AgentSession] = [:]
             // opencode has no per-PID state file, so it is asked once per
@@ -70,7 +77,7 @@ final class AgentMonitor: ObservableObject {
             var scannedDirectories: Set<String> = []
 
             for target in targets {
-                if let session = Self.claudeSession(of: target, children: children) {
+                if let session = self.claudeSession(of: target, children: children) {
                     found[target.id] = session
                     continue
                 }
@@ -91,8 +98,8 @@ final class AgentMonitor: ObservableObject {
     }
 
     /// The Claude Code session inside a process's subtree, if there is one.
-    private static func claudeSession(of target: AgentTarget,
-                                      children: [pid_t: [pid_t]]) -> AgentSession? {
+    private nonisolated func claudeSession(of target: AgentTarget,
+                                           children: [pid_t: [pid_t]]) -> AgentSession? {
         for pid in ProcessTree.descendants(of: target.pid, children: children) {
             if let session = readSession(pid: pid) { return session }
         }
@@ -120,8 +127,8 @@ final class AgentMonitor: ObservableObject {
 
     // MARK: - Reading Claude Code state
 
-    private static func readSession(pid: pid_t) -> AgentSession? {
-        let url = sessionsDirectory.appendingPathComponent("\(pid).json")
+    private nonisolated func readSession(pid: pid_t) -> AgentSession? {
+        let url = Self.sessionsDirectory.appendingPathComponent("\(pid).json")
         guard let data = try? Data(contentsOf: url),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let sessionID = object["sessionId"] as? String,
@@ -131,7 +138,7 @@ final class AgentMonitor: ObservableObject {
         let activity = AgentSession.Activity(rawValue: object["status"] as? String ?? "") ?? .unknown
         var session = AgentSession(sessionID: sessionID, cwd: cwd, activity: activity)
 
-        if let transcript = transcriptURL(sessionID: sessionID, cwd: cwd) {
+        if let transcript = Self.transcriptURL(sessionID: sessionID, cwd: cwd) {
             if let usage = usage(in: transcript) {
                 session.model = usage.model
                 session.contextTokens = usage.tokens
@@ -148,13 +155,21 @@ final class AgentMonitor: ObservableObject {
     /// line is the current context size - summing turns would multiply it many
     /// times over. Compaction resets the figure, which is why the last line is
     /// right and the maximum is not.
-    private static func usage(in url: URL) -> (model: String?, tokens: Int)? {
+    ///
+    /// Parsed once per version of the file: the scan asks this about every
+    /// recent sub-agent on every tick, and a transcript only answers
+    /// differently once it has been written to.
+    private nonisolated func usage(in url: URL) -> TranscriptCache.Usage? {
+        transcripts.usage(for: url) { Self.parseUsage(in: $0) }
+    }
+
+    private nonisolated static func parseUsage(in url: URL) -> TranscriptCache.Usage? {
         guard let tail = readTail(of: url, bytes: 512 * 1024) else { return nil }
 
         // The end of the file is bookkeeping (attachments, titles, modes), so
         // scan backwards for the newest line that actually carries usage.
         for line in tail.split(separator: "\n").reversed() {
-            guard line.contains("\"usage\""),
+            guard containsUsageMarker(line),
                   let data = line.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   object["type"] as? String == "assistant",
@@ -168,9 +183,40 @@ final class AgentMonitor: ObservableObject {
             let cacheCreation = usage["cache_creation_input_tokens"] as? Int ?? 0
             let total = input + cacheRead + cacheCreation
             guard total > 0 else { continue }
-            return (message["model"] as? String, total)
+            return TranscriptCache.Usage(model: message["model"] as? String, tokens: total)
         }
         return nil
+    }
+
+    /// Whether a transcript line mentions usage at all.
+    ///
+    /// `line.contains` goes through ICU's locale-aware matcher, which showed up
+    /// hot in stack samples while the monitor rescanned hundreds of
+    /// transcripts. The marker is plain ASCII, so a byte compare is exact and
+    /// far cheaper.
+    private nonisolated static func containsUsageMarker(_ line: Substring) -> Bool {
+        let pattern = Array("\"usage\"".utf8)
+        guard let first = pattern.first else { return true }
+        let bytes = line.utf8
+        var index = bytes.startIndex
+        while index < bytes.endIndex {
+            if bytes[index] == first, matches(pattern, at: index, in: bytes) {
+                return true
+            }
+            index = bytes.index(after: index)
+        }
+        return false
+    }
+
+    private nonisolated static func matches(_ pattern: [UInt8],
+                                            at start: Substring.UTF8View.Index,
+                                            in bytes: Substring.UTF8View) -> Bool {
+        var index = start
+        for byte in pattern {
+            guard index < bytes.endIndex, bytes[index] == byte else { return false }
+            index = bytes.index(after: index)
+        }
+        return true
     }
 
     /// Sub-agent transcripts sit in a `subagents` directory beside the parent's
@@ -178,8 +224,11 @@ final class AgentMonitor: ObservableObject {
     ///
     /// Only recently-written files are considered: a long-lived session
     /// accumulates hundreds of finished sub-agents, and listing them all would
-    /// bury the handful that are actually live.
-    private static func subagents(besides transcript: URL) -> [AgentSession.Subagent] {
+    /// bury the handful that are actually live. Enumerating and stat-ing the
+    /// tree is cheap; reading is not, so only the files that can reach the
+    /// list get read - the newest `maxSubagents * 2` of them, which covers
+    /// every candidate for the `maxSubagents` slots that are shown.
+    private nonisolated func subagents(besides transcript: URL) -> [AgentSession.Subagent] {
         let root = transcript.deletingPathExtension()
             .appendingPathComponent("subagents")
         guard let enumerator = FileManager.default.enumerator(
@@ -187,36 +236,42 @@ final class AgentMonitor: ObservableObject {
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]) else { return [] }
 
-        let cutoff = Date().addingTimeInterval(-recentWindow)
-        var found: [(date: Date, subagent: AgentSession.Subagent)] = []
+        let cutoff = Date().addingTimeInterval(-Self.recentWindow)
+        var candidates: [(url: URL, modified: Date)] = []
 
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             guard url.lastPathComponent.hasPrefix("agent-") else { continue }
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
             guard modified > cutoff else { continue }
-
-            let workflow = url.deletingLastPathComponent().lastPathComponent
-            let usage = usage(in: url)
-            let subagent = AgentSession.Subagent(
-                id: url.deletingPathExtension().lastPathComponent,
-                title: title(of: url) ?? "Sub-agent",
-                contextTokens: usage?.tokens,
-                model: usage?.model,
-                isActive: modified > Date().addingTimeInterval(-activeWindow),
-                workflow: workflow == "subagents" ? nil : workflow)
-            found.append((modified, subagent))
+            candidates.append((url, modified))
         }
 
-        return found
-            .sorted { $0.date > $1.date }
-            .prefix(maxSubagents)
-            .map(\.subagent)
+        let now = Date()
+        return candidates
+            .sorted { $0.modified > $1.modified }
+            .prefix(Self.maxSubagents * 2)
+            .map { candidate in
+                let workflow = candidate.url.deletingLastPathComponent().lastPathComponent
+                let usage = usage(in: candidate.url)
+                return AgentSession.Subagent(
+                    id: candidate.url.deletingPathExtension().lastPathComponent,
+                    title: title(of: candidate.url) ?? "Sub-agent",
+                    contextTokens: usage?.tokens,
+                    model: usage?.model,
+                    isActive: candidate.modified > now.addingTimeInterval(-Self.activeWindow),
+                    workflow: workflow == "subagents" ? nil : workflow)
+            }
     }
 
     /// Sub-agents carry no name, so the first line of the prompt they were given
-    /// is the closest thing to one.
-    private static func title(of url: URL) -> String? {
+    /// is the closest thing to one. Cached per version of the file: a sub-agent
+    /// that is not being written to has no new name to offer.
+    private nonisolated func title(of url: URL) -> String? {
+        transcripts.title(for: url) { Self.parseTitle(of: $0) }
+    }
+
+    private nonisolated static func parseTitle(of url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let head = try? handle.read(upToCount: 8 * 1024),
@@ -237,14 +292,14 @@ final class AgentMonitor: ObservableObject {
             : String(firstMeaningfulLine.prefix(72))
     }
 
-    private static let recentWindow: TimeInterval = 30 * 60
-    private static let activeWindow: TimeInterval = 20
-    private static let maxSubagents = 12
+    nonisolated private static let recentWindow: TimeInterval = 30 * 60
+    nonisolated private static let activeWindow: TimeInterval = 20
+    nonisolated private static let maxSubagents = 12
 
     /// Transcripts live under a slug of the directory the session was *started*
     /// in, which is not necessarily the directory it works on - so the slug is a
     /// hint, and the whole tree is searched by session id if it misses.
-    private static func transcriptURL(sessionID: String, cwd: String) -> URL? {
+    private nonisolated static func transcriptURL(sessionID: String, cwd: String) -> URL? {
         let direct = projectsDirectory
             .appendingPathComponent(slug(for: cwd))
             .appendingPathComponent("\(sessionID).jsonl")
@@ -260,14 +315,14 @@ final class AgentMonitor: ObservableObject {
     }
 
     /// Every character outside [A-Za-z0-9-] becomes `-`; case is preserved.
-    static func slug(for path: String) -> String {
+    nonisolated static func slug(for path: String) -> String {
         String(path.map { character in
             character.isASCII && (character.isLetter || character.isNumber) ? character : "-"
         })
     }
 
     /// Transcripts reach tens of megabytes; only the tail is ever needed.
-    private static func readTail(of url: URL, bytes: Int) -> String? {
+    private nonisolated static func readTail(of url: URL, bytes: Int) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let end = try? handle.seekToEnd() else { return nil }

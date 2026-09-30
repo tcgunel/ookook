@@ -68,6 +68,12 @@ final class AgentSessionStore: ObservableObject {
 
     private var refreshing: Set<String> = []
 
+    /// Parsed transcript facts, kept until a file actually changes. The
+    /// scanner runs on a timer so a resume menu never shows a stale session
+    /// list; without this it re-read every transcript - megabytes each - on
+    /// every refresh whether or not anything had been written.
+    private nonisolated let transcripts = TranscriptCache()
+
     func sessions(for projectID: String, provider: AgentProvider?) -> [AgentSessionSummary] {
         guard let provider else { return [] }
         return (sessions[projectID] ?? []).filter { $0.provider == provider }
@@ -82,7 +88,7 @@ final class AgentSessionStore: ObservableObject {
         guard !refreshing.contains(projectID) else { return }
         refreshing.insert(projectID)
         Task.detached(priority: .utility) {
-            let claude = Self.scanClaude(Self.claudeTranscriptDirectory(for: root))
+            let claude = self.scanClaude(Self.claudeTranscriptDirectory(for: root))
             let codex = Self.scanCodex(projectRoot: root)
             let opencode = OpenCodeSessions.summaries(projectRoot: root, limit: Self.maxSessions)
             let found = (claude + codex + opencode)
@@ -111,7 +117,7 @@ final class AgentSessionStore: ObservableObject {
             .appendingPathComponent(".claude/projects/\(slug)", isDirectory: true)
     }
 
-    private nonisolated static func scanClaude(_ directory: URL) -> [AgentSessionSummary] {
+    private nonisolated func scanClaude(_ directory: URL) -> [AgentSessionSummary] {
         let manager = FileManager.default
         guard let entries = try? manager.contentsOfDirectory(
             at: directory,
@@ -126,9 +132,9 @@ final class AgentSessionStore: ObservableObject {
                 guard let date = values?.contentModificationDate else { return nil }
                 return (url, date, values?.fileSize ?? 0)
             }
-            .filter { $0.2 > minimumTranscriptBytes }
+            .filter { $0.2 > Self.minimumTranscriptBytes }
             .sorted { $0.1 > $1.1 }
-            .prefix(maxSessions)
+            .prefix(Self.maxSessions)
 
         return transcripts.map { url, date, _ in
             AgentSessionSummary(
@@ -214,7 +220,14 @@ final class AgentSessionStore: ObservableObject {
         return model
     }
 
-    private nonisolated static func firstPrompt(in url: URL) -> String? {
+    /// First real user message of a session, for the menu label. Cached per
+    /// version of the transcript: the scanner runs on a timer, and a session
+    /// that has not been written to cannot have a new first prompt.
+    private nonisolated func firstPrompt(in url: URL) -> String? {
+        transcripts.firstPrompt(for: url) { Self.parseFirstPrompt(in: $0) }
+    }
+
+    private nonisolated static func parseFirstPrompt(in url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: headBytes),
@@ -235,7 +248,12 @@ final class AgentSessionStore: ObservableObject {
         return nil
     }
 
-    private nonisolated static func lastModel(in url: URL) -> String? {
+    /// Model the newest turn ran on. Cached for the same reason as the prompt.
+    private nonisolated func lastModel(in url: URL) -> String? {
+        transcripts.lastModel(for: url) { Self.parseLastModel(in: $0) }
+    }
+
+    private nonisolated static func parseLastModel(in url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
