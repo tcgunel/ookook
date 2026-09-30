@@ -11,6 +11,10 @@ struct ChatMessage {
     let date: Date
     var text: String
     let chatJID: String
+    /// WhatsApp's ZMESSAGETYPE (1 image, 2 video, 3 voice, 8 document...).
+    let mediaType: Int
+    /// Path under the WhatsApp media root, when the message carries media.
+    let mediaPath: String?
     /// What the model sees before the colon: ME or the coworker's name.
     var speaker: String
 
@@ -71,6 +75,9 @@ final class WhatsAppStore {
     /// WhatsApp later purges from disk keeps its text.
     var ocrCache: [String: String] = [:]
     var ocrEnabled = true
+
+    /// Transcripts per message pk, for the same reason.
+    var transcriptCache: [String: String] = [:]
 
     init(path: String = WhatsAppStore.defaultDatabase) {
         self.path = path
@@ -162,7 +169,7 @@ final class WhatsAppStore {
         JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION
         LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
         """
-    private static let messageFilter = " AND (COALESCE(m.ZTEXT, mi.ZTITLE) IS NOT NULL OR m.ZMESSAGETYPE = 1)"
+    private static let messageFilter = " AND (COALESCE(m.ZTEXT, mi.ZTITLE) IS NOT NULL OR m.ZMESSAGETYPE IN (1, 2, 3))"
 
     /// Messages in one chat with `since <= date < until`, oldest first.
     func fetchMessages(chat: TicketChat, since: Date, until: Date? = nil) throws -> [ChatMessage] {
@@ -219,10 +226,29 @@ final class WhatsAppStore {
                 if !shot.isEmpty { text! += " (screenshot text: \(shot))" }
             }
             out.append(ChatMessage(pk: pk, fromMe: fromMe, date: date, text: text ?? "",
-                                   chatJID: chat.jid,
+                                   chatJID: chat.jid, mediaType: type, mediaPath: mediaPath,
                                    speaker: fromMe ? "ME" : chat.speakerLabel))
         }
         return out
+    }
+
+    /// Absolute URL of a media file, or nil when the message has no path or
+    /// WhatsApp has purged the file.
+    func mediaURL(_ relativePath: String?) -> URL? {
+        guard let relativePath, !relativePath.isEmpty else { return nil }
+        let full = (Self.mediaRoot as NSString).appendingPathComponent(relativePath)
+        return FileManager.default.fileExists(atPath: full) ? URL(fileURLWithPath: full) : nil
+    }
+
+    /// The file extension a media path should keep when it is committed to a
+    /// repo: the original one where it is plainly safe, otherwise the usual
+    /// extension for that message type. Returns nil for anything that would
+    /// not survive a commit path, so a hostile filename cannot steer the write.
+    static func attachmentExtension(_ relativePath: String?, mediaType: Int) -> String? {
+        let original = URL(fileURLWithPath: relativePath ?? "").pathExtension.lowercased()
+        let safe = original.count <= 5 && original.allSatisfy { $0.isLetter || $0.isNumber }
+        if safe, !original.isEmpty { return original }
+        return [1: "jpg", 2: "mp4", 8: "pdf"][mediaType]
     }
 
     // MARK: OCR
@@ -233,11 +259,8 @@ final class WhatsAppStore {
         let key = String(pk)
         if let cached = ocrCache[key] { return cached }
         var text = ""
-        if ocrEnabled, let relativePath, !relativePath.isEmpty {
-            let full = (Self.mediaRoot as NSString).appendingPathComponent(relativePath)
-            if FileManager.default.fileExists(atPath: full) {
-                text = String(Self.recognizeText(at: URL(fileURLWithPath: full)).prefix(limit))
-            }
+        if ocrEnabled, let url = mediaURL(relativePath) {
+            text = String(Self.recognizeText(at: url).prefix(limit))
         }
         ocrCache[key] = text
         return text

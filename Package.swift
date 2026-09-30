@@ -15,6 +15,9 @@ let package = Package(
         // its visible strip, and rows the cache skipped on it came back blank.
         .package(url: "https://github.com/tcgunel/SwiftTerm", revision: "ee5631ef0dbffcd70103397ce05fe95c68f05aa1"),
         .package(url: "https://github.com/jpsim/Yams", from: "5.1.0"),
+        // Voice notes and video audio are transcribed on-device: DeepSeek takes
+        // no audio, and Apple's speech models have no Turkish.
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.0"),
     ],
     targets: [
         .executableTarget(
@@ -22,6 +25,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "Yams", package: "Yams"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
             ],
             path: "Sources/Ookook",
             // SwiftTerm's view layer is main-thread-confined AppKit written against
