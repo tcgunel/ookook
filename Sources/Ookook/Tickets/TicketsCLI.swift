@@ -6,8 +6,9 @@ import Foundation
 ///     Ookook tickets list-chats
 ///     Ookook tickets import-config <wa-tickets config.json> --project <id>
 ///     Ookook tickets set-key <deepseek key> [--project <id>]
-///     Ookook tickets backtest --project <id> --from 2026-04-20 --to 2026-05-08 [--out report.json]
-///     Ookook tickets redact-test --project <id> [--hours 24]
+///     Ookook tickets backtest --project <id> --from 2026-04-20 --to 2026-05-08 [--out report.json] [--transcribe]
+///     Ookook tickets redact-test --project <id> [--hours 24] [--transcribe]
+///     Ookook tickets transcribe <audio-or-video file> [--model tiny] [--language tr]
 ///
 /// Uses the same UserDefaults domain and Keychain items as the GUI when run
 /// from inside the app bundle (`Ookook.app/Contents/MacOS/Ookook tickets ...`).
@@ -116,7 +117,9 @@ enum TicketsCLI {
             guard config.isConfigured else { throw CLIError("project \(id) has no chats/repos configured") }
             guard let key = o.string("key") ?? TicketsKeychain.deepSeekKey(projectID: id) else { throw DeepSeekError.noKey }
             let deepSeek = DeepSeekClient(apiKey: key, model: config.model, baseURL: config.baseURL)
-            let report = await TicketPipeline.backtest(config: config, deepSeek: deepSeek, from: from, to: to,
+            let transcriber = o.string("transcribe") != nil ? await MainActor.run { Transcriber() } : nil
+            let report = await TicketPipeline.backtest(config: config, deepSeek: deepSeek, transcriber: transcriber,
+                                                       from: from, to: to,
                                                        progress: { print($0); fflush(stdout) }, isCancelled: { false })
             print("\n\(report.issues.count) issues from \(report.messages) msgs / \(report.batches) batches")
             print(report.usage.summary)
@@ -138,20 +141,44 @@ enum TicketsCLI {
                 print("report -> \(out)")
             }
 
+        case "transcribe":
+            guard let path = o.positional.first else {
+                throw CLIError("usage: transcribe <audio or video file> [--model tiny|small|large-v3-v20240930_626MB] [--language tr|en|auto]")
+            }
+            let transcriber = await MainActor.run { Transcriber() }
+            let previous = await MainActor.run { transcriber.model }
+            if let model = o.string("model") { await MainActor.run { transcriber.model = model } }
+            let language = o.string("language") ?? "tr"
+            let started = Date()
+            let text = await transcriber.transcribe(fileURL: URL(fileURLWithPath: path),
+                                                   language: language == "auto" || language.isEmpty ? nil : language)
+            let state = await MainActor.run { transcriber.state }
+            let seconds = Date().timeIntervalSince(started)
+            let transcript = text ?? ""
+            print(String(format: "%.1fs  state=%@  %d chars", seconds, String(describing: state), transcript.count))
+            print(transcript)
+            // The model picker is a user setting; a CLI run must not change it.
+            await MainActor.run { transcriber.model = previous }
+
         case "redact-test":
             guard let id = o.string("project") else { throw CLIError("usage: redact-test --project <id> [--hours N]") }
             let hours = Double(o.string("hours") ?? "24") ?? 24
             let config = await MainActor.run { TicketsConfigStore().config(for: id) }
             let store = WhatsAppStore()
             defer { store.close() }
+            let transcriber = o.string("transcribe") != nil ? await MainActor.run { Transcriber() } : nil
             for chat in config.chats {
                 var messages = try store.fetchMessages(chat: chat, since: Date().addingTimeInterval(-hours * 3600))
+                if let transcriber {
+                    await transcriber.attachTranscripts(to: &messages, store: store,
+                                                       language: config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage)
+                }
                 Redactor.redactSequence(&messages)
                 for m in messages { print(m.formatted) }
             }
 
         default:
-            print("commands: list-chats, import-config, set-key, backtest, redact-test")
+            print("commands: list-chats, import-config, set-key, backtest, redact-test, transcribe")
         }
     }
 

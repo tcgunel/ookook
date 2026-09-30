@@ -61,8 +61,28 @@ final class GitHubClient {
         "type:integration": "c2e0c6", "type:ops": "fef2c0", "type:question": "d4c5f9",
     ]
 
-    let token: String
+    private(set) var token: String
+
+    /// Resolves a credential afresh when the API rejects the current one.
+    ///
+    /// A `gh` login that was rotated, or a token that lost access to a repo,
+    /// reads as 401, 403 or - for a private repository - 404. Without this the
+    /// rejection sticks for as long as the token lives, which for the sidebar's
+    /// board means silently empty columns.
+    var refreshToken: (() -> String?)?
+
     init(token: String) { self.token = token }
+
+    /// A client that can re-resolve its own credential for `projectID`.
+    static func resolving(projectID: String) -> GitHubClient? {
+        guard let token = resolveToken(projectID: projectID) else { return nil }
+        let client = GitHubClient(token: token)
+        client.refreshToken = {
+            invalidateGhToken()
+            return resolveToken(projectID: projectID)
+        }
+        return client
+    }
 
     // MARK: Token discovery
 
@@ -74,6 +94,12 @@ final class GitHubClient {
     }
 
     private static var cachedGhToken: (value: String, at: Date)?
+
+    /// Drops the token remembered from `gh`, so the next resolve asks the CLI
+    /// again rather than reusing a credential the API has just rejected.
+    static func invalidateGhToken() {
+        cachedGhToken = nil
+    }
 
     static func ghAuthToken() -> String? {
         if let cached = cachedGhToken, Date().timeIntervalSince(cached.at) < 3600 { return cached.value }
@@ -118,9 +144,20 @@ final class GitHubClient {
     private func json(_ method: String, _ path: String, query: [String: String] = [:],
                       body: Any? = nil) async throws -> Any {
         let (data, code) = try await request(method, path, query: query, body: body)
-        guard (200 ..< 300).contains(code) else {
-            throw GitHubError.http(code, String(data: data, encoding: .utf8) ?? "")
+        if (200 ..< 300).contains(code) { return try parse(data) }
+
+        if let refreshToken, let fresh = refreshToken(), fresh != token {
+            token = fresh
+            let (retryData, retryCode) = try await request(method, path, query: query, body: body)
+            guard (200 ..< 300).contains(retryCode) else {
+                throw GitHubError.http(retryCode, String(data: retryData, encoding: .utf8) ?? "")
+            }
+            return try parse(retryData)
         }
+        throw GitHubError.http(code, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    private func parse(_ data: Data) throws -> Any {
         if data.isEmpty { return [:] as [String: Any] }
         return try JSONSerialization.jsonObject(with: data)
     }
@@ -221,5 +258,66 @@ final class GitHubClient {
             try await removeLabel(repo: repo, number: number, other)
         }
         try await addLabels(repo: repo, number: number, [column])
+    }
+
+    // MARK: Attachments
+
+    /// Branch chat media is committed to, kept out of the default branch so a
+    /// ticket's screenshots never land in the project's own history.
+    static let attachmentBranch = "ookook-attachments"
+
+    /// Repos whose attachment branch is known to exist, so the ref is looked
+    /// up once per client rather than once per file.
+    private var attachmentBranchReady: Set<String> = []
+
+    /// Creates the attachment branch if the repo does not have it yet.
+    ///
+    /// The probes use `request` rather than `json` on purpose: a 404 is the
+    /// expected answer for a branch that is not there yet, and `json` would
+    /// treat it as a rejected credential, rotate the token and retry.
+    private func ensureAttachmentBranch(repo: String) async throws {
+        guard !attachmentBranchReady.contains(repo) else { return }
+        let existing = try? await request("GET", "/repos/\(repo)/git/ref/heads/\(Self.attachmentBranch)")
+        if let existing, (200 ..< 300).contains(existing.1) {
+            attachmentBranchReady.insert(repo)
+            return
+        }
+        let info = try await json("GET", "/repos/\(repo)")
+        guard let info = info as? [String: Any],
+              let head = info["default_branch"] as? String else { throw GitHubError.badResponse }
+        let ref = try await json("GET", "/repos/\(repo)/git/ref/heads/\(head)")
+        let object = (ref as? [String: Any])?["object"] as? [String: Any]
+        guard let sha = object?["sha"] as? String else { throw GitHubError.badResponse }
+        _ = try await json("POST", "/repos/\(repo)/git/refs",
+                           body: ["ref": "refs/heads/\(Self.attachmentBranch)", "sha": sha])
+        attachmentBranchReady.insert(repo)
+    }
+
+    /// Commits one file to the attachment branch and returns the URL to embed.
+    ///
+    /// The `github.com/owner/repo/raw/...` form is deliberate and load-bearing.
+    /// The obvious `raw.githubusercontent.com` URL renders as a broken image in
+    /// a private repository - that host does not receive the reader's GitHub
+    /// cookie, so it 404s for everyone who can see the issue. The same-origin
+    /// form is authenticated by the session already in the browser and
+    /// displays. Verified against a private repo, not assumed.
+    func attach(repo: String, path: String, data: Data, message: String) async throws -> String {
+        try await ensureAttachmentBranch(repo: repo)
+        // Re-uploading the same path (a cursor reset, or a retry after a failed
+        // batch) needs the blob's current sha, or the API answers 422. A 404
+        // here is the normal first-upload case, hence `request` and not `json`.
+        var body: [String: Any] = [
+            "message": message,
+            "content": data.base64EncodedString(),
+            "branch": Self.attachmentBranch,
+        ]
+        if let existing = try? await request("GET", "/repos/\(repo)/contents/\(path)",
+                                             query: ["ref": Self.attachmentBranch]),
+           let object = try? parse(existing.0) as? [String: Any],
+           let sha = object["sha"] as? String {
+            body["sha"] = sha
+        }
+        _ = try await json("PUT", "/repos/\(repo)/contents/\(path)", body: body)
+        return "https://github.com/\(repo)/raw/\(Self.attachmentBranch)/\(path)"
     }
 }

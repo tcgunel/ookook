@@ -106,6 +106,10 @@ private struct TicketsProjectEditor: View {
 
     private var status: TicketsProjectStatus { worker.status[projectID] ?? TicketsProjectStatus() }
 
+    private var modelBinding: Binding<String> {
+        Binding(get: { worker.transcriber.model }, set: { worker.transcriber.model = $0 })
+    }
+
     var body: some View {
         Form {
             Section {
@@ -188,6 +192,7 @@ private struct TicketsProjectEditor: View {
             Section("Classification") {
                 TextField("Model", text: $draft.model)
                 TextField("Base URL", text: $draft.baseURL)
+                DeepSeekPeakHoursRow()
                 Stepper("Poll every \(draft.pollSeconds)s", value: $draft.pollSeconds, in: 10 ... 600, step: 10)
                 Stepper("Batch gap \(draft.batchGapSeconds / 60) min", value: $draft.batchGapSeconds, in: 60 ... 3600, step: 60)
                 Stepper("Wait for \(draft.quietSeconds)s of quiet", value: $draft.quietSeconds, in: 0 ... 900, step: 30)
@@ -202,6 +207,47 @@ private struct TicketsProjectEditor: View {
             Section("Quality of life") {
                 Toggle("Notify when a ticket is created", isOn: $draft.notifyOnNewTicket)
                 Toggle("Read text in screenshots (local Vision OCR)", isOn: $draft.ocrScreenshots)
+                Toggle("Attach screenshots, videos and documents to tickets", isOn: $draft.attachMedia)
+                if draft.attachMedia {
+                    HStack {
+                        Text("At most \(draft.maxAttachmentsPerPost) per ticket or comment")
+                        Stepper("", value: $draft.maxAttachmentsPerPost, in: 0 ... 20, step: 1)
+                            .labelsHidden()
+                            .frame(width: 120)
+                        Text("skip files over \(draft.maxAttachmentMB) MB")
+                        Stepper("", value: $draft.maxAttachmentMB, in: 1 ... 100, step: 1)
+                            .labelsHidden()
+                            .frame(width: 120)
+                    }
+                    Text("Images, videos and documents are committed to an `ookook-attachments` branch in the ticket's repo and linked from the issue. "
+                         + "Only the text is redacted — the file itself is uploaded as-is, so anything visible in a screenshot becomes readable by everyone with access to that repo.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Toggle("Transcribe voice notes and videos (local Whisper)", isOn: $draft.transcribeMedia)
+                    Spacer()
+                    Picker("Model", selection: modelBinding) {
+                        ForEach(Transcriber.models, id: \.id) { model in
+                            Text(model.label).tag(model.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 230)
+                }
+                HStack {
+                    Text("Spoken language")
+                    Picker("", selection: $draft.transcribeLanguage) {
+                        Text("Auto-detect").tag("")
+                        Text("Turkish").tag("tr")
+                        Text("English").tag("en")
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    Spacer()
+                }
+                TranscriptionStatusRow(transcriber: worker.transcriber)
+                Text("Transcription runs on this Mac — audio never leaves it. The model downloads once from Hugging Face, and each message is transcribed once.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Toggle("Auto-approve bug/feature tickets", isOn: Binding(
                         get: { draft.autoApproveAbove <= 1 },
@@ -271,6 +317,7 @@ private struct TicketsProjectEditor: View {
                 }
                 Text("Replays the chat range through the classifier into memory. Nothing is written to GitHub or to the cursor; it costs API tokens.")
                     .font(.caption).foregroundStyle(.secondary)
+                PeakRateNotice()
                 if let run = worker.backtest[projectID] {
                     BacktestResultView(run: run)
                 }
@@ -331,6 +378,88 @@ private struct SharedKeyRow: View {
         HStack {
             SecureField("Shared DeepSeek API key (used when a project has none)", text: $key)
             Button("Save Shared") { TicketsKeychain.set(key, account: TicketsKeychain.sharedAccount) }
+        }
+    }
+}
+
+/// Live view of DeepSeek's peak/off-peak billing windows on the local clock.
+private struct DeepSeekPeakHoursRow: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let now = context.date
+            let state = DeepSeekPricing.state(at: now)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(state.isPeak ? Color.orange : Color.green)
+                        .frame(width: 7, height: 7)
+                    Text(DeepSeekPricing.statusText(at: now)).font(.caption)
+                    Spacer()
+                    Button("Pricing page…") { NSWorkspace.shared.open(DeepSeekPricing.pricingURL) }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                Text("Peak hours in \(TimeZone.current.identifier): "
+                     + DeepSeekPricing.localWeeklyPattern(around: now, timeZone: .current)
+                     + ". Off-peak is half price.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .help(DeepSeekPricing.detail(at: now))
+        }
+    }
+}
+
+/// A nudge when an action would run while DeepSeek charges peak rates.
+private struct PeakRateNotice: View {
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let state = DeepSeekPricing.state(at: context.date)
+            if state.isPeak, let end = state.changesAt {
+                Label("Peak rates right now — they drop at "
+                      + DeepSeekPricing.transitionLabel(end, from: context.date)
+                      + " (off-peak is half price).",
+                      systemImage: "clock.badge.exclamationmark")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        }
+    }
+}
+
+/// Whisper model state, and the button that fetches it before the first note.
+private struct TranscriptionStatusRow: View {
+    @ObservedObject var transcriber: Transcriber
+
+    private var canDownload: Bool {
+        switch transcriber.state {
+        case .idle, .failed: return true
+        case .loading, .ready: return false
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch transcriber.state {
+            case .idle:
+                if transcriber.isModelDownloaded {
+                    Text("Model downloaded — it loads on first use.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Model not downloaded yet.").font(.caption).foregroundStyle(.secondary)
+                }
+            case .loading:
+                ProgressView().controlSize(.small)
+                Text("Loading the model — the first download is large.").font(.caption).foregroundStyle(.secondary)
+            case .ready:
+                Label("Model ready", systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(2)
+            }
+            Spacer()
+            if canDownload {
+                Button(transcriber.isModelDownloaded ? "Load Model" : "Download Model") { transcriber.prepare() }
+                    .font(.caption)
+            }
         }
     }
 }

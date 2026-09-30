@@ -56,6 +56,25 @@ struct TicketsProjectConfig: Codable, Equatable {
     // Quality-of-life options
     var notifyOnNewTicket = true
     var ocrScreenshots = true
+    /// Upload the screenshots, videos and documents a task was raised from to
+    /// the ticket's own repo, and link them from the issue body.
+    ///
+    /// Off by default, and the reason is not timidity: OCR text goes through
+    /// the Redactor, but pixels do not, and these chats carry panel
+    /// credentials inside screenshots. Turning this on publishes whatever is
+    /// in them to everyone with access to the repo.
+    var attachMedia = false
+    /// Cap per issue body or comment, so one screenshot-heavy batch cannot
+    /// flood the repo.
+    var maxAttachmentsPerPost = 6
+    /// Per-file cap. A WhatsApp video is often tens of MB, and the Contents API
+    /// wants the whole file base64-encoded inside a single request.
+    var maxAttachmentMB = 15
+    /// Voice notes and video audio are transcribed locally with Whisper.
+    var transcribeMedia = false
+    /// Spoken language for transcription; empty means auto-detect, which
+    /// handles the mixed Turkish/English chats better than forcing one.
+    var transcribeLanguage = ""
     /// Tasks at or above this confidence skip triage and go straight to `todo`.
     /// 1.0 (or anything above 1) disables it.
     var autoApproveAbove = 1.01
@@ -92,6 +111,11 @@ struct TicketsProjectConfig: Codable, Equatable {
         languageHint = try c.decodeIfPresent(String.self, forKey: .languageHint) ?? d.languageHint
         notifyOnNewTicket = try c.decodeIfPresent(Bool.self, forKey: .notifyOnNewTicket) ?? d.notifyOnNewTicket
         ocrScreenshots = try c.decodeIfPresent(Bool.self, forKey: .ocrScreenshots) ?? d.ocrScreenshots
+        attachMedia = try c.decodeIfPresent(Bool.self, forKey: .attachMedia) ?? d.attachMedia
+        maxAttachmentsPerPost = try c.decodeIfPresent(Int.self, forKey: .maxAttachmentsPerPost) ?? d.maxAttachmentsPerPost
+        maxAttachmentMB = try c.decodeIfPresent(Int.self, forKey: .maxAttachmentMB) ?? d.maxAttachmentMB
+        transcribeMedia = try c.decodeIfPresent(Bool.self, forKey: .transcribeMedia) ?? d.transcribeMedia
+        transcribeLanguage = try c.decodeIfPresent(String.self, forKey: .transcribeLanguage) ?? d.transcribeLanguage
         autoApproveAbove = try c.decodeIfPresent(Double.self, forKey: .autoApproveAbove) ?? d.autoApproveAbove
         autoApproveTypes = try c.decodeIfPresent([String].self, forKey: .autoApproveTypes) ?? d.autoApproveTypes
         ignoredTypes = try c.decodeIfPresent([String].self, forKey: .ignoredTypes) ?? d.ignoredTypes

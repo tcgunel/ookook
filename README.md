@@ -114,8 +114,31 @@ matching issue. Everything is redacted before it leaves the machine.
 Configure it per project in Settings › Tickets: the chats to read, the repos
 (with local clones for a file map), a DeepSeek key (Keychain; a shared key is
 the fallback), and options such as auto-approving confident bug/feature
-tickets, ignoring types, active hours and screenshot OCR. Ookook needs Full
-Disk Access to read the WhatsApp database; the pane has a button for it.
+tickets, ignoring types, active hours, screenshot OCR and voice/video
+transcription. Ookook needs Full Disk Access to read the WhatsApp database; the
+pane has a button for it.
+
+Customer voice notes and the audio track of videos are transcribed on-device
+with Whisper, so the model only ever sees text (DeepSeek has no audio input,
+and Apple's speech models have no Turkish). The model is a one-time download
+from Hugging Face, chosen in the same pane; transcripts are cached per message,
+so media WhatsApp later purges keeps its text.
+
+Screenshots, videos and documents can also be attached to the tickets they came
+from. This is off by default, and the reason is worth stating plainly: the
+redactor masks secrets in the OCR *text*, but it cannot touch the *pixels*, and
+these chats carry panel credentials inside screenshots. With it on, the file is
+uploaded as-is to an `ookook-attachments` branch in the ticket's repo and linked
+from the issue, which makes it readable by everyone with access to that repo —
+including the rest of the org. Per-post and per-file caps are in the same pane.
+Files WhatsApp has already purged from disk are skipped and logged.
+
+Follow-up comments carry their media too, not just the ticket body: a
+resolution or a status nudge often arrives with the screenshot that prompted
+it, sometimes days after the original report. Links are resolved against the
+repo that actually holds the issue, so a follow-up on a ticket in `crm` does
+not drop its images into the project's first repo. A message cited by both a
+new ticket and a later follow-up is committed once and linked from both.
 
 The sidebar shows a Tickets group under each enabled project. Hover a row for
 approve/close, double-click to open on GitHub. Claude Code gets three MCP

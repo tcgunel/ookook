@@ -520,10 +520,10 @@ final class MCPServer: ObservableObject {
         guard !config.repos.isEmpty else {
             throw ToolError.message("\(project.name) has no ticket repositories. Configure them in Ookook › Settings › Tickets.")
         }
-        guard let token = GitHubClient.resolveToken(projectID: project.id) else {
+        guard let client = GitHubClient.resolving(projectID: project.id) else {
             throw ToolError.message(GitHubError.noToken.localizedDescription)
         }
-        return (GitHubClient(token: token), config)
+        return (client, config)
     }
 
     /// "owner/name#12" or "12" (default repo) or "#12".

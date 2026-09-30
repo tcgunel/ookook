@@ -15,7 +15,25 @@ struct TicketsState: Codable {
     /// "ref|kind|pks" -> ISO date, so a comment is posted once
     var comments: [String: String] = [:]
     var ocr: [String: String] = [:]
+    /// message pk -> transcript, so a purged voice note keeps its text
+    var transcripts: [String: String] = [:]
     var usage = DeepSeekUsage()
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey { case cursors, issues, comments, ocr, transcripts, usage }
+
+    // Tolerates missing keys, like the config does: a state file written by an
+    // older build must not decode to nothing, which would reset every cursor.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cursors = try c.decodeIfPresent([String: ChatCursor].self, forKey: .cursors) ?? [:]
+        issues = try c.decodeIfPresent([String: String].self, forKey: .issues) ?? [:]
+        comments = try c.decodeIfPresent([String: String].self, forKey: .comments) ?? [:]
+        ocr = try c.decodeIfPresent([String: String].self, forKey: .ocr) ?? [:]
+        transcripts = try c.decodeIfPresent([String: String].self, forKey: .transcripts) ?? [:]
+        usage = try c.decodeIfPresent(DeepSeekUsage.self, forKey: .usage) ?? DeepSeekUsage()
+    }
 
     static func url(projectID: String) -> URL? {
         guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -106,7 +124,13 @@ protocol TicketBoard: AnyObject {
     func ensureLabels() async
     func openIssues() async -> [BoardIssueSummary]
     func create(task: ClassifiedTask, title: String, body: String, labels: [String], repo: String, batch: [ChatMessage]) async -> String?
-    func comment(ref: String, text: String, addLabels: [String]) async -> Bool
+    /// Markdown to append to a new issue's body, uploading whatever media the
+    /// task was raised from. Empty when there is nothing to attach.
+    func attachments(for messages: [ChatMessage], repo: String) async -> String
+    /// `media` is the same run of messages the comment quotes, so an update's
+    /// screenshot lands on the comment that mentions it rather than only on
+    /// the ticket that started it.
+    func comment(ref: String, text: String, addLabels: [String], media: [ChatMessage]) async -> Bool
 }
 
 final class GitHubBoard: TicketBoard {
@@ -114,19 +138,33 @@ final class GitHubBoard: TicketBoard {
     let config: TicketsProjectConfig
     let isDryRun: Bool
     let log: (String) -> Void
+    /// Needed to resolve a message's media back to a file on disk. Absent only
+    /// where nothing is ever uploaded.
+    let store: WhatsAppStore?
     private var cache: [BoardIssueSummary]?
     private var cacheAt = Date.distantPast
     private var pending: [BoardIssueSummary] = []
     private var labelsDone = false
+    /// "repo#pk" -> URL already committed on this poll, so one screenshot
+    /// cited by a new ticket and by a follow-up is uploaded once and linked
+    /// from both. Scoped per poll: the board is rebuilt every cycle, so this
+    /// can never outlive the branch it describes.
+    private var uploadedMedia: [String: String] = [:]
     /// Issues created in this run, for notifications and the sidebar.
     private(set) var created: [TicketIssue] = []
 
-    init(client: GitHubClient, config: TicketsProjectConfig, dryRun: Bool, log: @escaping (String) -> Void) {
+    init(client: GitHubClient, config: TicketsProjectConfig, store: WhatsAppStore? = nil,
+         dryRun: Bool, log: @escaping (String) -> Void) {
         self.client = client
         self.config = config
+        self.store = store
         self.isDryRun = dryRun
         self.log = log
     }
+
+    /// Image, video and document messages. Voice notes and stickers are not
+    /// evidence in a bug report, and a voice note has no image to show.
+    static let attachableMedia: Set<Int> = [1, 2, 8]
 
     func ensureLabels() async {
         guard !isDryRun, !labelsDone else { return }
@@ -170,14 +208,83 @@ final class GitHubBoard: TicketBoard {
         }
     }
 
-    func comment(ref: String, text: String, addLabels: [String]) async -> Bool {
+    /// Uploads the media behind a run of messages and returns the markdown to
+    /// append to an issue body or a comment.
+    ///
+    /// Deliberately best-effort: a missing or oversized file is logged and
+    /// skipped, never fatal. A ticket without its screenshot is still a
+    /// ticket, and the OCR text is already in the body.
+    func attachments(for messages: [ChatMessage], repo: String) async -> String {
+        guard config.attachMedia, !isDryRun, let store else { return "" }
+        let wanted = messages.filter { Self.attachableMedia.contains($0.mediaType) }
+        guard !wanted.isEmpty else { return "" }
+        let budget = max(0, config.maxAttachmentsPerPost)
+        let maxBytes = max(1, config.maxAttachmentMB) * 1_048_576
+        func embed(_ url: String, _ message: ChatMessage) -> String {
+            "![chat media \(ChatMessage.stamp.string(from: message.date))](<\(url)>)"
+        }
+        var links: [String] = []
+        for message in wanted.prefix(budget) {
+            // Already sent on this poll - a message cited by both a new issue
+            // and a later follow-up. The link still belongs in both places; the
+            // file does not need committing twice.
+            if let seen = uploadedMedia["\(repo)#\(message.pk)"] {
+                links.append(embed(seen, message))
+                continue
+            }
+            guard let local = store.mediaURL(message.mediaPath) else {
+                log("  media #\(message.pk) skipped: WhatsApp already purged it")
+                continue
+            }
+            guard let data = try? Data(contentsOf: local) else {
+                log("  media #\(message.pk) skipped: cannot read \(local.lastPathComponent)")
+                continue
+            }
+            if data.count > maxBytes {
+                log("  media #\(message.pk) skipped: \(data.count / 1_048_576) MB is over the "
+                    + "\(config.maxAttachmentMB) MB cap")
+                continue
+            }
+            guard let ext = WhatsAppStore.attachmentExtension(message.mediaPath, mediaType: message.mediaType) else {
+                log("  media #\(message.pk) skipped: no usable file extension")
+                continue
+            }
+            // Keyed by message pk, so a re-run replaces its own file instead of
+            // piling up near-duplicates.
+            let path = "attachments/wa-\(message.pk).\(ext)"
+            do {
+                let url = try await client.attach(repo: repo, path: path, data: data,
+                                                  message: "chat media from message \(message.pk)")
+                uploadedMedia["\(repo)#\(message.pk)"] = url
+                links.append(embed(url, message))
+            } catch {
+                log("  media #\(message.pk) upload failed: \(error.localizedDescription)")
+            }
+        }
+        if wanted.count > budget {
+            log("  \(wanted.count - budget) more attachment(s) in this batch not uploaded (cap is \(budget))")
+        }
+        guard !links.isEmpty else { return "" }
+        return "\n**Attachments**\n" + links.joined(separator: "\n\n") + "\n\n"
+    }
+
+    func comment(ref: String, text: String, addLabels: [String], media: [ChatMessage] = []) async -> Bool {
         if isDryRun {
-            log("WOULD COMMENT on \(ref) \(addLabels): \(text.prefix(160))")
+            // Worth naming the media: a dry run is how the attach toggle gets
+            // checked without pushing a single pixel off the machine.
+            let attachable = media.filter { Self.attachableMedia.contains($0.mediaType) }
+            let note = attachable.isEmpty ? "" : " +\(attachable.count) attachment(s)"
+            log("WOULD COMMENT on \(ref) \(addLabels): \(text.prefix(160))\(note)")
             return true
         }
         guard let (repo, number) = Self.split(ref) else { return false }
         do {
-            try await client.comment(repo: repo, number: number, body: text)
+            // Uploaded against the repo that actually holds the issue, which is
+            // not always the project's first repo - a follow-up can land on a
+            // ticket in ksyazilim/crm while the task routed to kolaysiparis.
+            // The links are appended after redaction so they survive verbatim.
+            let links = await attachments(for: media, repo: repo)
+            try await client.comment(repo: repo, number: number, body: text + links)
             try? await client.addLabels(repo: repo, number: number, addLabels)
             return true
         } catch {
@@ -226,7 +333,10 @@ final class MemoryBoard: TicketBoard {
         return ref
     }
 
-    func comment(ref: String, text: String, addLabels: [String]) async -> Bool {
+    /// A backtest never touches the repo, so there is nothing to upload.
+    func attachments(for messages: [ChatMessage], repo: String) async -> String { "" }
+
+    func comment(ref: String, text: String, addLabels: [String], media: [ChatMessage] = []) async -> Bool {
         guard let i = issues.firstIndex(where: { $0.ref == ref }) else { return false }
         issues[i].events.append((text, addLabels))
         return true
@@ -241,28 +351,43 @@ final class TicketPipeline {
     let deepSeek: DeepSeekClient
     let board: TicketBoard
     let log: (String) -> Void
+    let transcriber: Transcriber?
     var state: TicketsState
 
     /// Set by the worker when the user turns the pipeline off mid-run.
     var isCancelled: () -> Bool = { false }
 
     init(projectID: String, config: TicketsProjectConfig, store: WhatsAppStore, deepSeek: DeepSeekClient,
-         board: TicketBoard, state: TicketsState, log: @escaping (String) -> Void) {
+         board: TicketBoard, state: TicketsState, transcriber: Transcriber? = nil, log: @escaping (String) -> Void) {
         self.projectID = projectID
         self.config = config
         self.store = store
         self.deepSeek = deepSeek
         self.board = board
         self.state = state
+        self.transcriber = transcriber
         self.log = log
         store.ocrCache = state.ocr
         store.ocrEnabled = config.ocrScreenshots
+        store.transcriptCache = state.transcripts
     }
 
     private func persist() {
         state.ocr = store.ocrCache
+        state.transcripts = store.transcriptCache
         state.usage = deepSeek.usage
         state.save(projectID: projectID)
+    }
+
+    /// Fills in voice/video transcripts before a batch goes to the model. The
+    /// cache means a message is transcribed once, no matter how often it is
+    /// quoted back as context.
+    private func transcribeMedia(in batch: inout [ChatMessage], context: inout [ChatMessage]) async {
+        guard config.transcribeMedia, let transcriber else { return }
+        let language = config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage
+        await transcriber.attachTranscripts(to: &batch, store: store, language: language)
+        await transcriber.attachTranscripts(to: &context, store: store, language: language)
+        persist()
     }
 
     // MARK: Repo map
@@ -404,9 +529,21 @@ final class TicketPipeline {
         return names.first ?? "owner/name"
     }
 
-    static func issueBody(task: ClassifiedTask, batch: [ChatMessage]) -> String {
+    /// The messages a task was raised from: the pks the model cited, or the
+    /// whole batch when it cited none. Shared so the quoted block and the
+    /// attached media can never disagree about what the source was.
+    static func sourceMessages(_ task: ClassifiedTask, in batch: [ChatMessage]) -> [ChatMessage] {
         let src = Set(task.sourcePks)
-        let quoted = batch.filter { src.isEmpty || src.contains($0.pk) }.map { "> " + $0.formatted }.joined(separator: "\n")
+        return batch.filter { src.isEmpty || src.contains($0.pk) }
+    }
+
+    /// The blockquote an issue body or comment carries.
+    static func quote(_ messages: [ChatMessage]) -> String {
+        messages.map { "> " + $0.formatted }.joined(separator: "\n")
+    }
+
+    static func issueBody(task: ClassifiedTask, batch: [ChatMessage]) -> String {
+        let quoted = quote(sourceMessages(task, in: batch))
         let files = task.likelyFiles.prefix(10).map { "- `\($0)`" }.joined(separator: "\n")
         var xmlBlock = ""
         if task.type == "xml" {
@@ -495,9 +632,9 @@ final class TicketPipeline {
             }
             if let existing = task.existingIssue, known.contains(existing) {
                 let pks = Set(task.sourcePks)
-                let quoted = batch.filter { pks.contains($0.pk) }.map { "> " + $0.formatted }.joined(separator: "\n")
-                let note = Redactor.redact("Requested again in chat (\(day)):\n\n\(quoted)")
-                if await board.comment(ref: existing, text: note, addLabels: ["requested-again"]) {
+                let cited = batch.filter { pks.contains($0.pk) }
+                let note = Redactor.redact("Requested again in chat (\(day)):\n\n\(Self.quote(cited))")
+                if await board.comment(ref: existing, text: note, addLabels: ["requested-again"], media: cited) {
                     log("  linked to \(existing): \(task.title)")
                     for pk in src { state.issues[pk] = existing }
                 }
@@ -505,7 +642,10 @@ final class TicketPipeline {
             }
             let repo = pickRepo(task)
             let title = task.shop.map { "\($0): \(task.title)" } ?? task.title
-            let body = Self.issueBody(task: task, batch: batch)
+            // issueBody redacts, so the uploaded links are appended after it:
+            // they are ours, and have to survive verbatim.
+            let media = await board.attachments(for: Self.sourceMessages(task, in: batch), repo: repo)
+            let body = Self.issueBody(task: task, batch: batch) + media
             if let ref = await board.create(task: task, title: title, body: body, labels: labels(for: task), repo: repo, batch: batch) {
                 log("  created \(ref): \(title)")
                 for pk in (src.isEmpty ? batch.map { String($0.pk) } : src) { state.issues[pk] = ref }
@@ -520,13 +660,13 @@ final class TicketPipeline {
                 continue // one resolution note per issue is enough
             }
             let pks = Set(update.sourcePks)
-            let quoted = batch.filter { pks.contains($0.pk) }.map { "> " + $0.formatted }.joined(separator: "\n")
+            let cited = batch.filter { pks.contains($0.pk) }
             let head = ["resolved": "Chat suggests this is resolved",
                         "followup": "Follow-up in chat",
                         "info": "New information in chat"][update.kind] ?? update.kind
-            let text = Redactor.redact("\(head) (\(day)): \(update.note)\n\n\(quoted)")
+            let text = Redactor.redact("\(head) (\(day)): \(update.note)\n\n\(Self.quote(cited))")
             let labels = ["resolved": ["resolved-in-chat"], "followup": ["requested-again"], "info": []][update.kind] ?? []
-            if await board.comment(ref: update.issue, text: text, addLabels: labels) {
+            if await board.comment(ref: update.issue, text: text, addLabels: labels, media: cited) {
                 log("  \(update.kind) -> \(update.issue)")
                 state.comments[key] = ISO8601DateFormatter().string(from: Date())
             }
@@ -577,7 +717,9 @@ final class TicketPipeline {
             await board.ensureLabels()
             for batch in Self.batches(messages, gap: Double(config.batchGapSeconds)) {
                 if isCancelled() { break }
-                let context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                var batch = batch
+                var context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                await transcribeMedia(in: &batch, context: &context)
                 await process(batch: batch, context: context, repoMap: map)
                 handled += 1
                 if !board.isDryRun {
@@ -608,14 +750,15 @@ final class TicketPipeline {
     }
 
     /// Replays [start, end) against an in-memory board. No GitHub, no state changes.
-    static func backtest(config: TicketsProjectConfig, deepSeek: DeepSeekClient, from start: Date, to end: Date,
+    static func backtest(config: TicketsProjectConfig, deepSeek: DeepSeekClient, transcriber: Transcriber? = nil,
+                         from start: Date, to end: Date,
                          progress: @escaping (String) -> Void, isCancelled: @escaping () -> Bool) async -> BacktestReport {
         var report = BacktestReport()
         let board = MemoryBoard()
         let store = WhatsAppStore()
         defer { store.close() }
         let pipeline = TicketPipeline(projectID: "backtest", config: config, store: store, deepSeek: deepSeek,
-                                      board: board, state: TicketsState(), log: { line in
+                                      board: board, state: TicketsState(), transcriber: transcriber, log: { line in
             report.log.append(line)
             progress(line)
         })
@@ -632,7 +775,9 @@ final class TicketPipeline {
             progress("\(chat.name): \(messages.count) msgs in \(batches.count) batches")
             for batch in batches {
                 if isCancelled() { break }
-                let context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                var batch = batch
+                var context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                await pipeline.transcribeMedia(in: &batch, context: &context)
                 await pipeline.process(batch: batch, context: context, repoMap: map)
             }
         }

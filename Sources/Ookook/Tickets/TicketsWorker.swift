@@ -8,6 +8,10 @@ struct TicketsProjectStatus: Equatable {
     var lastPoll: Date?
     var lastBatch: Date?
     var lastError: String?
+    /// Why the board's columns are empty, when the last board fetch failed.
+    /// Kept apart from `lastError` so a quiet chat and a broken connection do
+    /// not read as the same thing.
+    var boardError: String?
     var usage = DeepSeekUsage()
     var issues: [TicketIssue] = []
     var issuesFetchedAt: Date?
@@ -37,7 +41,15 @@ final class TicketsWorker: ObservableObject {
         var cancelled = false
     }
 
+    /// How often the GitHub board is re-read. The columns come from GitHub, not
+    /// from the message poll, so they go stale on their own - and a credential
+    /// the API has started rejecting should heal without a restart.
+    private static let boardRefreshSeconds: TimeInterval = 300
+
     let configs: TicketsConfigStore
+    /// One Whisper instance for the whole app: models are large, and the
+    /// engine serialises work anyway.
+    let transcriber = Transcriber()
     private var timers: [String: Timer] = [:]
     private var pipelines: [String: TicketPipeline] = [:]
     private var stores: [String: WhatsAppStore] = [:]
@@ -112,7 +124,7 @@ final class TicketsWorker: ObservableObject {
     private func makePipeline(_ id: String, dryRun: Bool = false) throws -> TicketPipeline {
         let config = configs.config(for: id)
         guard let key = TicketsKeychain.deepSeekKey(projectID: id) else { throw DeepSeekError.noKey }
-        guard let token = GitHubClient.resolveToken(projectID: id) else { throw GitHubError.noToken }
+        guard let github = GitHubClient.resolving(projectID: id) else { throw GitHubError.noToken }
         let store = stores[id] ?? WhatsAppStore()
         stores[id] = store
         let name = projectName(id)
@@ -120,11 +132,11 @@ final class TicketsWorker: ObservableObject {
             Task { @MainActor in self?.append(line, project: name) }
         }
         let deepSeek = DeepSeekClient(apiKey: key, model: config.model, baseURL: config.baseURL)
-        let board = GitHubBoard(client: GitHubClient(token: token), config: config, dryRun: dryRun, log: logger)
+        let board = GitHubBoard(client: github, config: config, store: store, dryRun: dryRun, log: logger)
         let state = TicketsState.load(projectID: id)
         deepSeek.usage = state.usage
         let pipeline = TicketPipeline(projectID: id, config: config, store: store, deepSeek: deepSeek,
-                                      board: board, state: state, log: logger)
+                                      board: board, state: state, transcriber: transcriber, log: logger)
         let flag = CancelFlag()
         cancelFlags[id] = flag
         pipeline.isCancelled = { flag.isSet }
@@ -143,6 +155,9 @@ final class TicketsWorker: ObservableObject {
         defer {
             inFlight.remove(id)
             status[id]?.isBusy = false
+        }
+        if Date().timeIntervalSince(status[id]?.issuesFetchedAt ?? .distantPast) > Self.boardRefreshSeconds {
+            await refreshIssues(id)
         }
         do {
             // Rebuilt each poll so settings edits apply without a restart; the
@@ -181,17 +196,28 @@ final class TicketsWorker: ObservableObject {
     /// Loads the board columns for the sidebar. Cheap enough to call on demand.
     func refreshIssues(_ id: String) async {
         let config = configs.config(for: id)
-        guard let token = GitHubClient.resolveToken(projectID: id) else { return }
-        let client = GitHubClient(token: token)
+        guard let client = GitHubClient.resolving(projectID: id) else {
+            var s = status[id] ?? TicketsProjectStatus()
+            s.boardError = GitHubError.noToken.localizedDescription
+            status[id] = s
+            return
+        }
         var all: [TicketIssue] = []
+        // One unreadable repo must not hide the rest of the board, but it must
+        // not be silent either - an empty column with no reason is how tickets
+        // "disappear".
+        var failure: String?
         for repo in config.repos {
-            if let issues = try? await client.boardIssues(repo: repo.repo, lookbackDays: 7) {
-                all += issues
+            do {
+                all += try await client.boardIssues(repo: repo.repo, lookbackDays: 7)
+            } catch {
+                failure = failure ?? "\(repo.repo): \(error.localizedDescription)"
             }
         }
         var s = status[id] ?? TicketsProjectStatus()
         s.issues = all
         s.issuesFetchedAt = Date()
+        s.boardError = failure
         status[id] = s
     }
 
@@ -269,9 +295,10 @@ final class TicketsWorker: ObservableObject {
         run.isRunning = true
         backtest[id] = run
         let deepSeek = DeepSeekClient(apiKey: key, model: config.model, baseURL: config.baseURL)
+        let transcriber = self.transcriber
         Task.detached {
             let report = await TicketPipeline.backtest(
-                config: config, deepSeek: deepSeek, from: from, to: to,
+                config: config, deepSeek: deepSeek, transcriber: transcriber, from: from, to: to,
                 progress: { line in Task { @MainActor in run.lines.append(line) } },
                 isCancelled: { run.cancelled })
             await MainActor.run {

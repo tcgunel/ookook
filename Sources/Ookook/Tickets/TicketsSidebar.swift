@@ -18,7 +18,7 @@ struct TicketsSidebarSection: View {
             column("Triage", key: "triage", icon: "tray.full", accent: .yellow)
             column("Todo", key: "todo", icon: "circle", accent: .green)
             column("In Progress", key: "in-progress", icon: "circle.lefthalf.filled", accent: .blue)
-            if let error = status.lastError {
+            if let error = status.lastError ?? status.boardError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption2).foregroundStyle(.orange).lineLimit(2)
             }
@@ -37,7 +37,9 @@ struct TicketsSidebarSection: View {
                         .help("\(triage) waiting for your approval")
                 }
                 Circle()
-                    .fill(status.isRunning ? (status.lastError == nil ? Color.green : .orange) : Color.secondary.opacity(0.4))
+                    .fill(status.isRunning
+                          ? ((status.lastError == nil && status.boardError == nil) ? Color.green : .orange)
+                          : Color.secondary.opacity(0.4))
                     .frame(width: 6, height: 6)
                     .help(statusHelp)
             }
@@ -54,7 +56,10 @@ struct TicketsSidebarSection: View {
         var parts: [String] = [status.isRunning ? "Pipeline running" : "Pipeline off"]
         if let poll = status.lastPoll { parts.append("polled " + poll.formatted(date: .omitted, time: .shortened)) }
         if let batch = status.lastBatch { parts.append("last batch " + batch.formatted(date: .omitted, time: .shortened)) }
+        if let fetched = status.issuesFetchedAt { parts.append("board " + fetched.formatted(date: .omitted, time: .shortened)) }
+        if let error = status.boardError { parts.append(error) }
         parts.append(status.usage.summary)
+        parts.append(DeepSeekPricing.shortStatus(at: Date()))
         return parts.joined(separator: "\n")
     }
 
