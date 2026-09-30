@@ -137,23 +137,36 @@ struct GridView: View {
     private var content: some View {
         let columns = columns(for: measuredSize.width)
         let cell = cellWidth(for: measuredSize.width, columns: columns)
-        return ScrollView {
-            VStack(spacing: Self.spacing) {
-                ForEach(Array(rows(columns: columns).enumerated()), id: \.offset) { _, row in
-                    HStack(alignment: .top, spacing: Self.spacing) {
-                        ForEach(row) { controller in
-                            tile(controller, columns: columns, cell: cell)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: Self.spacing) {
+                    ForEach(Array(rows(columns: columns).enumerated()), id: \.offset) { _, row in
+                        HStack(alignment: .top, spacing: Self.spacing) {
+                            ForEach(row) { controller in
+                                tile(controller, columns: columns, cell: cell)
+                            }
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
                     }
                 }
+                .padding(Self.padding)
             }
-            .padding(Self.padding)
-        }
-        .sheet(item: $renaming) { target in
-            RenameSheet(target: target) { newName in
-                if case .process(let projectID, let process, _) = target {
-                    layout.rename(projectID: projectID, process: process, to: newName)
+            // ⌘-arrow navigation walks the same order the grid draws, so a
+            // tile can be selected while it is below the fold. Scrolling to it
+            // is what makes the shortcut useful in a grid that does not fit -
+            // otherwise the selection moves somewhere off screen and the tile
+            // only appears if you scroll after it by hand. `anchor: nil` means
+            // "the least it takes": a selection that is already on screen does
+            // not move the grid at all.
+            .onChange(of: selection) { _, selected in
+                guard let selected else { return }
+                proxy.scrollTo(selected, anchor: nil)
+            }
+            .sheet(item: $renaming) { target in
+                RenameSheet(target: target) { newName in
+                    if case .process(let projectID, let process, _) = target {
+                        layout.rename(projectID: projectID, process: process, to: newName)
+                    }
                 }
             }
         }
@@ -213,6 +226,9 @@ struct GridView: View {
                                                 process: controller.spec.name)
                              })
             .frame(width: cell * Double(span) + Self.spacing * Double(span - 1))
+            // What `scrollTo` addresses the tile by. Identity, not index: the
+            // grid reflows on its own as spans and column counts change.
+            .id(controller.ref)
     }
 
     private func drop(_ dragged: ProcessRef, before target: ProcessRef) {
