@@ -105,18 +105,33 @@ yet in this keychain (only App Store and Development certs are).
 
 ## Tickets (WhatsApp → DeepSeek → GitHub Issues)
 
-Ookook can read the WhatsApp desktop app's local database, classify new
+Ookook can read a local WhatsApp client's message database - the official
+desktop app, ZapFast, or whichever one is actually current - classify new
 messages from chosen coworkers with DeepSeek, and file them as GitHub issues
 on a label-based board: `triage` (needs your approval) → `todo` → `in-progress`
 → closed. Follow-ups and "fixed it" messages in chat land as comments on the
 matching issue. Everything is redacted before it leaves the machine.
 
-Configure it per project in Settings › Tickets: the chats to read, the repos
-(with local clones for a file map), a DeepSeek key (Keychain; a shared key is
-the fallback), and options such as auto-approving confident bug/feature
+The message source is per project: **Automatic** reads from whichever client
+has the fresher database (ZapFast wins ties, since it receives the same
+conversations), falling back per chat when one client has not synced a
+conversation yet. Pin WhatsApp or ZapFast in Settings › Tickets when the guess
+needs a correction. The two clients are independent companions of the same
+phone, so either database holds the same incoming messages while linked; the
+auto mode exists so uninstalling one of them never strands the pipeline.
+
+The official app's Core Data store needs **Full Disk Access**; the pane has a
+button for it. ZapFast 0.13+ stores its archive as an encrypted SQLCipher
+database and keeps the key in the login keychain: the first read shows one
+Keychain prompt for Ookook (choose Always Allow, like any other signed app).
+Full Disk Access is not needed for ZapFast. The settings header shows the
+readability of both clients and a button to re-check.
+
+Configure the rest per project in Settings › Tickets: the chats to read, the
+repos (with local clones for a file map), a DeepSeek key (Keychain; a shared
+key is the fallback), and options such as auto-approving confident bug/feature
 tickets, ignoring types, active hours, screenshot OCR and voice/video
-transcription. Ookook needs Full Disk Access to read the WhatsApp database; the
-pane has a button for it.
+transcription.
 
 Customer voice notes and the audio track of videos are transcribed on-device
 with Whisper, so the model only ever sees text (DeepSeek has no audio input,
@@ -149,7 +164,10 @@ close / leave for the PR / send back to triage).
 Headless checks, using the same settings as the app:
 
 ```bash
-./Ookook.app/Contents/MacOS/Ookook tickets list-chats
+./Ookook.app/Contents/MacOS/Ookook tickets list-chats [--source auto|whatsapp|zapfast]
 ./Ookook.app/Contents/MacOS/Ookook tickets backtest --project /path/to/project --from 2026-04-20 --to 2026-04-25
 ./Ookook.app/Contents/MacOS/Ookook tickets redact-test --project /path/to/project --hours 24
 ```
+
+`--source` pins the client for that run (the default follows the project's
+setting), and `list-chats` prints which client each row came from.

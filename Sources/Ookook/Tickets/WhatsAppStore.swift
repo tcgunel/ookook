@@ -1,44 +1,5 @@
 import Foundation
-import SQLite3
-import Vision
-import ImageIO
-
-/// One chat message as the pipeline sees it. `text` is the raw text; the
-/// redactor rewrites it before anything leaves the machine.
-struct ChatMessage {
-    let pk: Int
-    let fromMe: Bool
-    let date: Date
-    var text: String
-    let chatJID: String
-    /// WhatsApp's ZMESSAGETYPE (1 image, 2 video, 3 voice, 8 document...).
-    let mediaType: Int
-    /// Path under the WhatsApp media root, when the message carries media.
-    let mediaPath: String?
-    /// What the model sees before the colon: ME or the coworker's name.
-    var speaker: String
-
-    /// Message line as sent to the model and quoted in issue bodies.
-    var formatted: String {
-        "[\(pk)] \(Self.stamp.string(from: date)) \(speaker): \(text)"
-    }
-
-    static let stamp: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH:mm"
-        return f
-    }()
-}
-
-struct WhatsAppChat: Identifiable, Hashable {
-    let jid: String
-    let name: String
-    let isGroup: Bool
-    let messageCount: Int
-    let lastMessage: Date?
-    var id: String { jid }
-}
+import CSQLCipher
 
 enum WhatsAppError: LocalizedError {
     case missing(String)
@@ -54,12 +15,12 @@ enum WhatsAppError: LocalizedError {
     }
 }
 
-/// Read-only access to the WhatsApp desktop app's Core Data store.
+/// Read-only access to the official WhatsApp desktop app's Core Data store.
 ///
 /// Text lives in ZTEXT for text (0) and link (7) messages; image and video
 /// captions in ZWAMEDIAITEM.ZTITLE. Z_PK is NOT chronological (history sync
 /// assigns ids out of order), so every cursor is on ZMESSAGEDATE.
-final class WhatsAppStore {
+final class WhatsAppStore: ChatStore {
     static let coreDataEpoch: TimeInterval = 978_307_200
     static let defaultDatabase = NSString(string:
         "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite").expandingTildeInPath
@@ -68,16 +29,9 @@ final class WhatsAppStore {
 
     private static let mediaTag: [Int: String] = [1: "[image]", 2: "[video]", 3: "[voice]", 8: "[document]", 14: "[sticker]"]
 
+    let label = "WhatsApp app"
     let path: String
     private var db: OpaquePointer?
-
-    /// OCR text per message pk. Bound to the pipeline state so a screenshot
-    /// WhatsApp later purges from disk keeps its text.
-    var ocrCache: [String: String] = [:]
-    var ocrEnabled = true
-
-    /// Transcripts per message pk, for the same reason.
-    var transcriptCache: [String: String] = [:]
 
     init(path: String = WhatsAppStore.defaultDatabase) {
         self.path = path
@@ -132,7 +86,7 @@ final class WhatsAppStore {
 
     // MARK: Chats
 
-    func listChats(limit: Int = 80) throws -> [WhatsAppChat] {
+    func listChats(limit: Int = 80) throws -> [ChatSummary] {
         let db = try open()
         let sql = """
             SELECT ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZMESSAGECOUNTER, ZLASTMESSAGEDATE
@@ -146,7 +100,7 @@ final class WhatsAppStore {
         }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int(stmt, 1, Int32(limit))
-        var chats: [WhatsAppChat] = []
+        var chats: [ChatSummary] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let jid = Self.text(stmt, 0) ?? ""
             let name = Self.text(stmt, 1) ?? jid
@@ -154,10 +108,21 @@ final class WhatsAppStore {
             let count = Int(sqlite3_column_int(stmt, 3))
             let last = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil
                 : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4) + Self.coreDataEpoch)
-            chats.append(WhatsAppChat(jid: jid, name: name, isGroup: type == 1,
-                                      messageCount: count, lastMessage: last))
+            chats.append(ChatSummary(jid: jid, name: name, isGroup: type == 1,
+                                     messageCount: count, lastMessage: last))
         }
         return chats
+    }
+
+    func hasChat(_ jid: String) throws -> Bool {
+        let db = try open()
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM ZWACHATSESSION WHERE ZCONTACTJID = ? LIMIT 1", -1, &stmt, nil) == SQLITE_OK else {
+            throw WhatsAppError.query(String(cString: sqlite3_errmsg(db)))
+        }
+        sqlite3_bind_text(stmt, 1, jid, -1, Self.transient)
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 
     // MARK: Messages
@@ -213,7 +178,7 @@ final class WhatsAppStore {
             var text = Self.text(stmt, 3)
             let type = Int(sqlite3_column_int(stmt, 4))
             let title = Self.text(stmt, 5)
-            let mediaPath = Self.text(stmt, 6)
+            let relative = Self.text(stmt, 6)
 
             if text == nil {
                 let tag = Self.mediaTag[type] ?? "[media]"
@@ -221,64 +186,14 @@ final class WhatsAppStore {
             } else if type == 7, let title, !title.isEmpty, !(text!.contains(title)) {
                 text! += " [link: \(title)]"
             }
-            if type == 1 {
-                let shot = ocr(pk: pk, relativePath: mediaPath)
-                if !shot.isEmpty { text! += " (screenshot text: \(shot))" }
-            }
-            out.append(ChatMessage(pk: pk, fromMe: fromMe, date: date, text: text ?? "",
+            // Absolute up front: the pipeline no longer knows which client a
+            // message came from, and both stores hand it resolvable paths.
+            let mediaPath = relative.map { (Self.mediaRoot as NSString).appendingPathComponent($0) }
+            out.append(ChatMessage(id: String(pk), fromMe: fromMe, date: date, text: text ?? "",
                                    chatJID: chat.jid, mediaType: type, mediaPath: mediaPath,
                                    speaker: fromMe ? "ME" : chat.speakerLabel))
         }
         return out
-    }
-
-    /// Absolute URL of a media file, or nil when the message has no path or
-    /// WhatsApp has purged the file.
-    func mediaURL(_ relativePath: String?) -> URL? {
-        guard let relativePath, !relativePath.isEmpty else { return nil }
-        let full = (Self.mediaRoot as NSString).appendingPathComponent(relativePath)
-        return FileManager.default.fileExists(atPath: full) ? URL(fileURLWithPath: full) : nil
-    }
-
-    /// The file extension a media path should keep when it is committed to a
-    /// repo: the original one where it is plainly safe, otherwise the usual
-    /// extension for that message type. Returns nil for anything that would
-    /// not survive a commit path, so a hostile filename cannot steer the write.
-    static func attachmentExtension(_ relativePath: String?, mediaType: Int) -> String? {
-        let original = URL(fileURLWithPath: relativePath ?? "").pathExtension.lowercased()
-        let safe = original.count <= 5 && original.allSatisfy { $0.isLetter || $0.isNumber }
-        if safe, !original.isEmpty { return original }
-        return [1: "jpg", 2: "mp4", 8: "pdf"][mediaType]
-    }
-
-    // MARK: OCR
-
-    /// Text in a screenshot, via Vision, cached per message. WhatsApp only keeps
-    /// recent media on disk, so an image that is gone yields "" and stays "".
-    func ocr(pk: Int, relativePath: String?, limit: Int = 700) -> String {
-        let key = String(pk)
-        if let cached = ocrCache[key] { return cached }
-        var text = ""
-        if ocrEnabled, let url = mediaURL(relativePath) {
-            text = String(Self.recognizeText(at: url).prefix(limit))
-        }
-        ocrCache[key] = text
-        return text
-    }
-
-    static func recognizeText(at url: URL) -> String {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return "" }
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        request.recognitionLanguages = ["tr-TR", "en-US"]
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        do { try handler.perform([request]) } catch { return "" }
-        let lines = (request.results ?? [])
-            .compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        return lines.joined(separator: " | ")
     }
 
     // MARK: Helpers

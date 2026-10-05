@@ -52,7 +52,12 @@ final class TicketsWorker: ObservableObject {
     let transcriber = Transcriber()
     private var timers: [String: Timer] = [:]
     private var pipelines: [String: TicketPipeline] = [:]
-    private var stores: [String: WhatsAppStore] = [:]
+    private var stores: [String: any ChatStore] = [:]
+    /// The source setting each cached store was built for, so changing the
+    /// picker rebuilds the store on the next poll without a restart.
+    private var storeSources: [String: TicketMessageSource] = [:]
+    /// Last resolved client, to log a source switch once instead of every poll.
+    private var storeLabels: [String: String] = [:]
     private var inFlight: Set<String> = []
     private var stopped: Set<String> = []
     private var cancelFlags: [String: CancelFlag] = [:]
@@ -110,6 +115,7 @@ final class TicketsWorker: ObservableObject {
         pipelines[id] = nil
         stores[id]?.close()
         stores[id] = nil
+        storeSources[id] = nil
         status[id]?.isRunning = false
         status[id]?.isBusy = false
     }
@@ -125,14 +131,34 @@ final class TicketsWorker: ObservableObject {
         let config = configs.config(for: id)
         guard let key = TicketsKeychain.deepSeekKey(projectID: id) else { throw DeepSeekError.noKey }
         guard let github = GitHubClient.resolving(projectID: id) else { throw GitHubError.noToken }
-        let store = stores[id] ?? WhatsAppStore()
-        stores[id] = store
         let name = projectName(id)
+        // Rebuild the store when the message-source setting changed, so the
+        // picker applies on the next poll without restarting the app.
+        if storeSources[id] != config.messageSource {
+            stores[id]?.close()
+            stores[id] = nil
+            storeSources[id] = config.messageSource
+            storeLabels[id] = nil
+        }
+        let store: any ChatStore
+        if let cached = stores[id] {
+            store = cached
+        } else {
+            let resolved = ChatStoreResolver.resolve(source: config.messageSource) { [weak self] line in
+                Task { @MainActor in self?.append(line, project: name) }
+            }
+            stores[id] = resolved
+            store = resolved
+        }
+        if storeLabels[id] != store.label {
+            storeLabels[id] = store.label
+            append("reading messages from \(store.label)", project: name)
+        }
         let logger: (String) -> Void = { [weak self] line in
             Task { @MainActor in self?.append(line, project: name) }
         }
         let deepSeek = DeepSeekClient(apiKey: key, model: config.model, baseURL: config.baseURL)
-        let board = GitHubBoard(client: github, config: config, store: store, dryRun: dryRun, log: logger)
+        let board = GitHubBoard(client: github, config: config, dryRun: dryRun, log: logger)
         let state = TicketsState.load(projectID: id)
         deepSeek.usage = state.usage
         let pipeline = TicketPipeline(projectID: id, config: config, store: store, deepSeek: deepSeek,
@@ -266,7 +292,7 @@ final class TicketsWorker: ObservableObject {
             // Reset needs no API keys, so fall back to a bare state edit.
             var state = TicketsState.load(projectID: id)
             let ts = Date().timeIntervalSince1970 - hours * 3600
-            for chat in configs.config(for: id).chats { state.cursors[chat.jid] = ChatCursor(cursor: ts, donePks: []) }
+            for chat in configs.config(for: id).chats { state.cursors[chat.jid] = ChatCursor(cursor: ts, doneIDs: []) }
             state.save(projectID: id)
             append("cursor moved back \(hours)h", project: projectName(id))
         }

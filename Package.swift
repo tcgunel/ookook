@@ -20,9 +20,36 @@ let package = Package(
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.0"),
     ],
     targets: [
+        // SQLCipher 4.x amalgamation, vendored from the tagged source release
+        // (v4.19.0). The ticket pipeline reads ZapFast's message archive, which
+        // is a SQLCipher database keyed from the login keychain; SQLCipher also
+        // opens the plaintext databases unchanged, so it replaces the system
+        // SQLite everywhere. CommonCrypto is the crypto provider - no OpenSSL.
+        .target(
+            name: "CSQLCipher",
+            path: "Sources/CSQLCipher",
+            publicHeadersPath: "include",
+            cSettings: [
+                // The amalgamation is maintained upstream; its own -Wshorten
+                // warnings are noise for every clean build.
+                .unsafeFlags(["-w"]),
+                .define("SQLITE_HAS_CODEC", to: "1"),
+                .define("SQLCIPHER_CRYPTO_CC", to: "1"),
+                .define("SQLITE_TEMP_STORE", to: "2"),
+                .define("SQLITE_THREADSAFE", to: "1"),
+                .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
+                .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
+                .define("NDEBUG", to: "1"),
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("Security"),
+            ]
+        ),
         .executableTarget(
             name: "Ookook",
             dependencies: [
+                "CSQLCipher",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "Yams", package: "Yams"),
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
@@ -31,10 +58,7 @@ let package = Package(
             // SwiftTerm's view layer is main-thread-confined AppKit written against
             // the Swift 5 concurrency model; pin the language mode rather than fight
             // strict-concurrency diagnostics across the dependency boundary.
-            swiftSettings: [.swiftLanguageMode(.v5)],
-            // opencode keeps its session history in a SQLite database; reading it
-            // for the Resume menu needs the system library and nothing more.
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

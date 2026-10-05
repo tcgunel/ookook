@@ -43,37 +43,61 @@ struct TicketsSettingsTab: View {
     }
 }
 
-/// Whether Ookook can read WhatsApp's database, and the button that fixes it.
+/// Whether Ookook can read either local message store, and the buttons that
+/// fix the reasons it cannot.
 private struct DatabaseAccessBadge: View {
-    @State private var error: String?
+    @State private var whatsappError: String?
+    @State private var zapfastError: String?
     @State private var checked = false
 
+    private var whatsappOK: Bool { whatsappError == nil }
+    private var zapfastOK: Bool { zapfastError == nil }
+
     var body: some View {
-        HStack(spacing: 8) {
+        VStack(alignment: .trailing, spacing: 2) {
             if checked {
-                Label(error == nil ? "WhatsApp database readable" : "Full Disk Access needed",
-                      systemImage: error == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(error == nil ? .green : .orange)
+                HStack(spacing: 8) {
+                    Label("WhatsApp app", systemImage: whatsappOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(whatsappOK ? .green : .orange)
+                        .font(.caption)
+                        .help(whatsappError ?? "Readable")
+                    Button("Full Disk Access…") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                    }
                     .font(.caption)
-                    .help(error ?? "")
+                }
+                HStack(spacing: 8) {
+                    Label("ZapFast", systemImage: zapfastOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(zapfastOK ? .green : .orange)
+                        .font(.caption)
+                        .help(zapfastError ?? "Readable")
+                    Button("Open ZapFast") {
+                        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "me.paolino.fastsapp") {
+                            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                        }
+                    }
+                    .font(.caption)
+                }
+                HStack {
+                    Spacer()
+                    Button {
+                        check(reprompt: true)
+                    } label: { Image(systemName: "arrow.clockwise") }
+                        .help("Check again")
+                }
             }
-            Button("Full Disk Access…") {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
-            }
-            .font(.caption)
-            Button {
-                check()
-            } label: { Image(systemName: "arrow.clockwise") }
-                .help("Check again")
         }
-        .onAppear(perform: check)
+        .onAppear { check(reprompt: false) }
     }
 
-    private func check() {
+    private func check(reprompt: Bool) {
         Task.detached {
-            let result = WhatsAppStore.canRead()
+            if reprompt { ZapFastKeychain.resetFailures() }
+            let whatsapp = WhatsAppStore.canRead()
+            let zapfast = ZapFastStore.canRead()
             await MainActor.run {
-                if case .failure(let e) = result { error = e.localizedDescription } else { error = nil }
+                if case .failure(let e) = whatsapp { whatsappError = e.localizedDescription } else { whatsappError = nil }
+                if case .failure(let e) = zapfast { zapfastError = e.localizedDescription } else { zapfastError = nil }
                 checked = true
             }
         }
@@ -116,6 +140,16 @@ private struct TicketsProjectEditor: View {
                 Toggle("Turn WhatsApp chats into GitHub tickets for \(projectName)", isOn: $draft.enabled)
                     .onChange(of: draft.enabled) { save() }
                 statusLine
+            }
+
+            Section("Messages") {
+                Picker("Read from", selection: $draft.messageSource) {
+                    ForEach(TicketMessageSource.allCases) { source in
+                        Text(source.label).tag(source)
+                    }
+                }
+                Text("Automatic follows whichever client is actually receiving: ZapFast while it stays linked and fresh, the official app if ZapFast falls behind. Pin one only to force a side.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Chats") {
@@ -522,7 +556,7 @@ private struct ChatPickerSheet: View {
     let existing: Set<String>
     let onPick: (TicketChat) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var chats: [WhatsAppChat] = []
+    @State private var chats: [ChatSummary] = []
     @State private var error: String?
     @State private var filter = ""
 
@@ -537,7 +571,7 @@ private struct ChatPickerSheet: View {
                 HStack {
                     VStack(alignment: .leading) {
                         Text(chat.name)
-                        Text("\(chat.isGroup ? "group" : "1:1") · \(chat.messageCount) msgs · \(chat.jid)")
+                        Text("\(chat.isGroup ? "group" : "1:1") · \(chat.messageCount) msgs · \(chat.sourceLabel ?? "chat") · \(chat.jid)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -561,17 +595,17 @@ private struct ChatPickerSheet: View {
         .onAppear(perform: load)
     }
 
-    private var filtered: [WhatsAppChat] {
+    private var filtered: [ChatSummary] {
         let q = filter.lowercased()
         return q.isEmpty ? chats : chats.filter { $0.name.lowercased().contains(q) || $0.jid.contains(q) }
     }
 
     private func load() {
         Task.detached {
-            let store = WhatsAppStore()
+            let store = ChatStoreResolver.resolve(source: .auto)
             defer { store.close() }
             do {
-                let list = try store.listChats()
+                let list = try store.listChats(limit: 500)
                 await MainActor.run { chats = list }
             } catch {
                 await MainActor.run { self.error = error.localizedDescription }

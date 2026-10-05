@@ -1,27 +1,55 @@
 import Foundation
 
-/// Where one chat's reading position is. Z_PK is not chronological, so the
-/// cursor is a timestamp plus the pks already handled at that exact second.
+/// Where one chat's reading position is. Message ids are not chronological,
+/// so the cursor is a timestamp plus the ids already handled at that exact
+/// second. State files from before the ZapFast support stored the WhatsApp
+/// app's integer pks; decoding maps them onto the string ids used now.
 struct ChatCursor: Codable, Equatable {
     var cursor: TimeInterval?
-    var donePks: [Int] = []
+    var doneIDs: [String] = []
+
+    enum CodingKeys: String, CodingKey { case cursor, doneIDs, donePks }
+
+    init(cursor: TimeInterval? = nil, doneIDs: [String] = []) {
+        self.cursor = cursor
+        self.doneIDs = doneIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cursor = try c.decodeIfPresent(TimeInterval.self, forKey: .cursor)
+        if let ids = try c.decodeIfPresent([String].self, forKey: .doneIDs) {
+            doneIDs = ids
+        } else if let pks = try c.decodeIfPresent([Int].self, forKey: .donePks) {
+            doneIDs = pks.map(String.init)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(cursor, forKey: .cursor)
+        try c.encode(doneIDs, forKey: .doneIDs)
+    }
 }
 
 /// Per-project pipeline state, one JSON file in Application Support.
 struct TicketsState: Codable {
     var cursors: [String: ChatCursor] = [:]
-    /// message pk -> issue ref, so a re-classified message never opens a second ticket
+    /// message id -> issue ref, so a re-classified message never opens a second ticket
     var issues: [String: String] = [:]
-    /// "ref|kind|pks" -> ISO date, so a comment is posted once
+    /// "ref|kind|ids" -> ISO date, so a comment is posted once
     var comments: [String: String] = [:]
     var ocr: [String: String] = [:]
-    /// message pk -> transcript, so a purged voice note keeps its text
+    /// message id -> transcript, so a purged voice note keeps its text
     var transcripts: [String: String] = [:]
     var usage = DeepSeekUsage()
+    /// Which client the cursors were built against. When it changes, message
+    /// ids stop matching and the cursors step over their last second.
+    var lastSource: String?
 
     init() {}
 
-    enum CodingKeys: String, CodingKey { case cursors, issues, comments, ocr, transcripts, usage }
+    enum CodingKeys: String, CodingKey { case cursors, issues, comments, ocr, transcripts, usage, lastSource }
 
     // Tolerates missing keys, like the config does: a state file written by an
     // older build must not decode to nothing, which would reset every cursor.
@@ -33,6 +61,7 @@ struct TicketsState: Codable {
         ocr = try c.decodeIfPresent([String: String].self, forKey: .ocr) ?? [:]
         transcripts = try c.decodeIfPresent([String: String].self, forKey: .transcripts) ?? [:]
         usage = try c.decodeIfPresent(DeepSeekUsage.self, forKey: .usage) ?? DeepSeekUsage()
+        lastSource = try c.decodeIfPresent(String.self, forKey: .lastSource)
     }
 
     static func url(projectID: String) -> URL? {
@@ -69,7 +98,7 @@ struct ClassifiedTask {
     var priority: String
     var likelyFiles: [String]
     var confidence: Double
-    var sourcePks: [Int]
+    var sourcePks: [String]
     var existingIssue: String?
     var xml: [String: Any]?
 
@@ -86,7 +115,7 @@ struct ClassifiedTask {
         priority = (raw["priority"] as? String)?.lowercased() ?? "medium"
         likelyFiles = raw["likely_files"] as? [String] ?? []
         confidence = (raw["confidence"] as? NSNumber)?.doubleValue ?? 0
-        sourcePks = (raw["source_pks"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue ?? Int("\($0)") }
+        sourcePks = (raw["source_pks"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.stringValue ?? ($0 as? String) }
         existingIssue = (raw["existing_issue"] as? String).flatMap { $0.isEmpty || $0 == "null" ? nil : $0 }
         xml = raw["xml"] as? [String: Any]
     }
@@ -96,7 +125,7 @@ struct ClassifiedUpdate {
     var issue: String
     var kind: String
     var note: String
-    var sourcePks: [Int]
+    var sourcePks: [String]
 
     init?(_ raw: [String: Any]) {
         guard let issue = raw["issue"] as? String, let kind = raw["kind"] as? String,
@@ -104,7 +133,7 @@ struct ClassifiedUpdate {
         self.issue = issue
         self.kind = kind
         note = raw["note"] as? String ?? ""
-        sourcePks = (raw["source_pks"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue ?? Int("\($0)") }
+        sourcePks = (raw["source_pks"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.stringValue ?? ($0 as? String) }
     }
 }
 
@@ -138,9 +167,6 @@ final class GitHubBoard: TicketBoard {
     let config: TicketsProjectConfig
     let isDryRun: Bool
     let log: (String) -> Void
-    /// Needed to resolve a message's media back to a file on disk. Absent only
-    /// where nothing is ever uploaded.
-    let store: WhatsAppStore?
     private var cache: [BoardIssueSummary]?
     private var cacheAt = Date.distantPast
     private var pending: [BoardIssueSummary] = []
@@ -153,11 +179,10 @@ final class GitHubBoard: TicketBoard {
     /// Issues created in this run, for notifications and the sidebar.
     private(set) var created: [TicketIssue] = []
 
-    init(client: GitHubClient, config: TicketsProjectConfig, store: WhatsAppStore? = nil,
+    init(client: GitHubClient, config: TicketsProjectConfig,
          dryRun: Bool, log: @escaping (String) -> Void) {
         self.client = client
         self.config = config
-        self.store = store
         self.isDryRun = dryRun
         self.log = log
     }
@@ -215,7 +240,7 @@ final class GitHubBoard: TicketBoard {
     /// skipped, never fatal. A ticket without its screenshot is still a
     /// ticket, and the OCR text is already in the body.
     func attachments(for messages: [ChatMessage], repo: String) async -> String {
-        guard config.attachMedia, !isDryRun, let store else { return "" }
+        guard config.attachMedia, !isDryRun else { return "" }
         let wanted = messages.filter { Self.attachableMedia.contains($0.mediaType) }
         guard !wanted.isEmpty else { return "" }
         let budget = max(0, config.maxAttachmentsPerPost)
@@ -228,37 +253,38 @@ final class GitHubBoard: TicketBoard {
             // Already sent on this poll - a message cited by both a new issue
             // and a later follow-up. The link still belongs in both places; the
             // file does not need committing twice.
-            if let seen = uploadedMedia["\(repo)#\(message.pk)"] {
+            if let seen = uploadedMedia["\(repo)#\(message.id)"] {
                 links.append(embed(seen, message))
                 continue
             }
-            guard let local = store.mediaURL(message.mediaPath) else {
-                log("  media #\(message.pk) skipped: WhatsApp already purged it")
+            guard let local = ChatMedia.url(message.mediaPath) else {
+                log("  media #\(message.id) skipped: the client already purged it")
                 continue
             }
             guard let data = try? Data(contentsOf: local) else {
-                log("  media #\(message.pk) skipped: cannot read \(local.lastPathComponent)")
+                log("  media #\(message.id) skipped: cannot read \(local.lastPathComponent)")
                 continue
             }
             if data.count > maxBytes {
-                log("  media #\(message.pk) skipped: \(data.count / 1_048_576) MB is over the "
+                log("  media #\(message.id) skipped: \(data.count / 1_048_576) MB is over the "
                     + "\(config.maxAttachmentMB) MB cap")
                 continue
             }
-            guard let ext = WhatsAppStore.attachmentExtension(message.mediaPath, mediaType: message.mediaType) else {
-                log("  media #\(message.pk) skipped: no usable file extension")
+            guard let ext = ChatMedia.attachmentExtension(message.mediaPath, mediaType: message.mediaType) else {
+                log("  media #\(message.id) skipped: no usable file extension")
                 continue
             }
-            // Keyed by message pk, so a re-run replaces its own file instead of
+            // Keyed by message id, so a re-run replaces its own file instead of
             // piling up near-duplicates.
-            let path = "attachments/wa-\(message.pk).\(ext)"
+            let stem = message.id.filter { $0.isLetter || $0.isNumber }.prefix(64)
+            let path = "attachments/wa-\(stem).\(ext)"
             do {
                 let url = try await client.attach(repo: repo, path: path, data: data,
-                                                  message: "chat media from message \(message.pk)")
-                uploadedMedia["\(repo)#\(message.pk)"] = url
+                                                  message: "chat media from message \(message.id)")
+                uploadedMedia["\(repo)#\(message.id)"] = url
                 links.append(embed(url, message))
             } catch {
-                log("  media #\(message.pk) upload failed: \(error.localizedDescription)")
+                log("  media #\(message.id) upload failed: \(error.localizedDescription)")
             }
         }
         if wanted.count > budget {
@@ -347,7 +373,7 @@ final class MemoryBoard: TicketBoard {
 final class TicketPipeline {
     let projectID: String
     let config: TicketsProjectConfig
-    let store: WhatsAppStore
+    let store: any ChatStore
     let deepSeek: DeepSeekClient
     let board: TicketBoard
     let log: (String) -> Void
@@ -357,7 +383,7 @@ final class TicketPipeline {
     /// Set by the worker when the user turns the pipeline off mid-run.
     var isCancelled: () -> Bool = { false }
 
-    init(projectID: String, config: TicketsProjectConfig, store: WhatsAppStore, deepSeek: DeepSeekClient,
+    init(projectID: String, config: TicketsProjectConfig, store: any ChatStore, deepSeek: DeepSeekClient,
          board: TicketBoard, state: TicketsState, transcriber: Transcriber? = nil, log: @escaping (String) -> Void) {
         self.projectID = projectID
         self.config = config
@@ -367,14 +393,9 @@ final class TicketPipeline {
         self.state = state
         self.transcriber = transcriber
         self.log = log
-        store.ocrCache = state.ocr
-        store.ocrEnabled = config.ocrScreenshots
-        store.transcriptCache = state.transcripts
     }
 
     private func persist() {
-        state.ocr = store.ocrCache
-        state.transcripts = store.transcriptCache
         state.usage = deepSeek.usage
         state.save(projectID: projectID)
     }
@@ -385,9 +406,16 @@ final class TicketPipeline {
     private func transcribeMedia(in batch: inout [ChatMessage], context: inout [ChatMessage]) async {
         guard config.transcribeMedia, let transcriber else { return }
         let language = config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage
-        await transcriber.attachTranscripts(to: &batch, store: store, language: language)
-        await transcriber.attachTranscripts(to: &context, store: store, language: language)
+        await transcriber.attachTranscripts(to: &batch, cache: &state.transcripts, language: language)
+        await transcriber.attachTranscripts(to: &context, cache: &state.transcripts, language: language)
         persist()
+    }
+
+    /// Screenshot text for image messages, cached in state per message id, so
+    /// a screenshot either client later purges keeps its text. Vision runs
+    /// here rather than in the stores because the cache outlives them.
+    private func withOCR(_ messages: [ChatMessage]) -> [ChatMessage] {
+        ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots, cache: &state.ocr)
     }
 
     // MARK: Repo map
@@ -529,12 +557,12 @@ final class TicketPipeline {
         return names.first ?? "owner/name"
     }
 
-    /// The messages a task was raised from: the pks the model cited, or the
+    /// The messages a task was raised from: the ids the model cited, or the
     /// whole batch when it cited none. Shared so the quoted block and the
     /// attached media can never disagree about what the source was.
     static func sourceMessages(_ task: ClassifiedTask, in batch: [ChatMessage]) -> [ChatMessage] {
         let src = Set(task.sourcePks)
-        return batch.filter { src.isEmpty || src.contains($0.pk) }
+        return batch.filter { src.isEmpty || src.contains($0.id) }
     }
 
     /// The blockquote an issue body or comment carries.
@@ -621,7 +649,7 @@ final class TicketPipeline {
                 log("  skip (\(task.type) ignored): \(task.title)")
                 continue
             }
-            let src = task.sourcePks.map(String.init)
+            let src = task.sourcePks
             if !src.isEmpty, src.allSatisfy({ state.issues[$0] != nil }) {
                 log("  skip (already ticketed \(state.issues[src[0]] ?? "")): \(task.title)")
                 continue
@@ -632,7 +660,7 @@ final class TicketPipeline {
             }
             if let existing = task.existingIssue, known.contains(existing) {
                 let pks = Set(task.sourcePks)
-                let cited = batch.filter { pks.contains($0.pk) }
+                let cited = batch.filter { pks.contains($0.id) }
                 let note = Redactor.redact("Requested again in chat (\(day)):\n\n\(Self.quote(cited))")
                 if await board.comment(ref: existing, text: note, addLabels: ["requested-again"], media: cited) {
                     log("  linked to \(existing): \(task.title)")
@@ -648,19 +676,19 @@ final class TicketPipeline {
             let body = Self.issueBody(task: task, batch: batch) + media
             if let ref = await board.create(task: task, title: title, body: body, labels: labels(for: task), repo: repo, batch: batch) {
                 log("  created \(ref): \(title)")
-                for pk in (src.isEmpty ? batch.map { String($0.pk) } : src) { state.issues[pk] = ref }
+                for pk in (src.isEmpty ? batch.map(\.id) : src) { state.issues[pk] = ref }
             }
         }
 
         for update in updates {
             guard known.contains(update.issue) else { continue }
-            let key = "\(update.issue)|\(update.kind)|\(update.sourcePks.map(String.init).joined(separator: ","))"
+            let key = "\(update.issue)|\(update.kind)|\(update.sourcePks.joined(separator: ","))"
             if state.comments[key] != nil { continue }
             if update.kind == "resolved", state.comments.keys.contains(where: { $0.hasPrefix("\(update.issue)|resolved|") }) {
                 continue // one resolution note per issue is enough
             }
             let pks = Set(update.sourcePks)
-            let cited = batch.filter { pks.contains($0.pk) }
+            let cited = batch.filter { pks.contains($0.id) }
             let head = ["resolved": "Chat suggests this is resolved",
                         "followup": "Follow-up in chat",
                         "info": "New information in chat"][update.kind] ?? update.kind
@@ -676,8 +704,10 @@ final class TicketPipeline {
     /// New messages in one chat since its cursor, minus the ones already handled.
     func newMessages(chat: TicketChat) throws -> [ChatMessage] {
         guard let cursor = state.cursors[chat.jid]?.cursor else { return [] }
-        let done = Set(state.cursors[chat.jid]?.donePks ?? [])
-        return try store.fetchMessages(chat: chat, since: Date(timeIntervalSince1970: cursor)).filter { !done.contains($0.pk) }
+        let done = Set(state.cursors[chat.jid]?.doneIDs ?? [])
+        let messages = try store.fetchMessages(chat: chat, since: Date(timeIntervalSince1970: cursor))
+            .filter { !done.contains($0.id) }
+        return withOCR(messages)
     }
 
     private func advanceCursor(chat: TicketChat, batch: [ChatMessage]) {
@@ -685,23 +715,42 @@ final class TicketPipeline {
         let lastTs = last.date.timeIntervalSince1970
         var c = state.cursors[chat.jid] ?? ChatCursor()
         if let cur = c.cursor, abs(cur - lastTs) < 1e-6 {
-            c.donePks = Array(Set(c.donePks).union(batch.map(\.pk))).sorted()
+            c.doneIDs = Array(Set(c.doneIDs).union(batch.map(\.id))).sorted()
         } else {
             c.cursor = lastTs
-            c.donePks = batch.filter { $0.date.timeIntervalSince1970 == lastTs }.map(\.pk)
+            c.doneIDs = batch.filter { $0.date.timeIntervalSince1970 == lastTs }.map(\.id)
         }
         state.cursors[chat.jid] = c
+    }
+
+    /// Carries the cursors over when the reading source changes: ids differ
+    /// between clients, and every message at a cursor's exact second was part
+    /// of the batch that advanced it, so the cursor steps one second forward
+    /// instead of re-reading a tail whose ids can never match.
+    private func adoptSourceIfChanged() {
+        guard !board.isDryRun, state.lastSource != store.label else { return }
+        // A state file from before this bookkeeping (no lastSource) was written
+        // by one of the clients too, so the same last-second skip applies.
+        for (jid, var cursor) in state.cursors {
+            guard let ts = cursor.cursor else { continue }
+            cursor.cursor = ts + 1
+            cursor.doneIDs = []
+            state.cursors[jid] = cursor
+        }
+        state.lastSource = store.label
+        persist()
     }
 
     /// One poll over every chat. Returns how many batches were classified.
     @discardableResult
     func runOnce(waitForQuiet: Bool = true) async throws -> Int {
+        adoptSourceIfChanged()
         var handled = 0
         var touched = false
         for chat in config.chats {
             if state.cursors[chat.jid]?.cursor == nil {
                 // First sight of this chat: start from now rather than churning through history.
-                state.cursors[chat.jid] = ChatCursor(cursor: Date().timeIntervalSince1970, donePks: [])
+                state.cursors[chat.jid] = ChatCursor(cursor: Date().timeIntervalSince1970, doneIDs: [])
                 touched = true
                 log("\(chat.name): cursor set to now; use Reset to backfill")
                 continue
@@ -718,7 +767,7 @@ final class TicketPipeline {
             for batch in Self.batches(messages, gap: Double(config.batchGapSeconds)) {
                 if isCancelled() { break }
                 var batch = batch
-                var context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                var context = withOCR((try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? [])
                 await transcribeMedia(in: &batch, context: &context)
                 await process(batch: batch, context: context, repoMap: map)
                 handled += 1
@@ -735,7 +784,7 @@ final class TicketPipeline {
     /// Moves every chat cursor back `hours`, so the next poll re-reads that window.
     func resetCursors(hours: Double) {
         let ts = Date().timeIntervalSince1970 - hours * 3600
-        for chat in config.chats { state.cursors[chat.jid] = ChatCursor(cursor: ts, donePks: []) }
+        for chat in config.chats { state.cursors[chat.jid] = ChatCursor(cursor: ts, doneIDs: []) }
         persist()
     }
 
@@ -755,7 +804,10 @@ final class TicketPipeline {
                          progress: @escaping (String) -> Void, isCancelled: @escaping () -> Bool) async -> BacktestReport {
         var report = BacktestReport()
         let board = MemoryBoard()
-        let store = WhatsAppStore()
+        let store = ChatStoreResolver.resolve(source: config.messageSource) { line in
+            report.log.append(line)
+            progress(line)
+        }
         defer { store.close() }
         let pipeline = TicketPipeline(projectID: "backtest", config: config, store: store, deepSeek: deepSeek,
                                       board: board, state: TicketsState(), transcriber: transcriber, log: { line in
@@ -765,10 +817,11 @@ final class TicketPipeline {
         pipeline.isCancelled = isCancelled
         let map = pipeline.repoMap()
         for chat in config.chats {
-            guard let messages = try? store.fetchMessages(chat: chat, since: start, until: end) else {
-                progress("\(chat.name): cannot read messages")
+            guard let fetched = try? store.fetchMessages(chat: chat, since: start, until: end) else {
+                progress("\(chat.name): cannot read messages from \(store.label)")
                 continue
             }
+            let messages = pipeline.withOCR(fetched)
             let batches = Self.batches(messages, gap: Double(config.batchGapSeconds))
             report.messages += messages.count
             report.batches += batches.count
@@ -776,7 +829,7 @@ final class TicketPipeline {
             for batch in batches {
                 if isCancelled() { break }
                 var batch = batch
-                var context = (try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? []
+                var context = pipeline.withOCR((try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? [])
                 await pipeline.transcribeMedia(in: &batch, context: &context)
                 await pipeline.process(batch: batch, context: context, repoMap: map)
             }

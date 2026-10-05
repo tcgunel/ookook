@@ -37,6 +37,10 @@ struct TicketsProjectConfig: Codable, Equatable {
     var chats: [TicketChat] = []
     var repos: [TicketRepo] = []
 
+    /// Which local client to read messages from. Automatic follows whichever
+    /// database is actually fresh; pinning it overrides the guess.
+    var messageSource: TicketMessageSource = .auto
+
     var model = "deepseek-chat"
     var baseURL = "https://api.deepseek.com"
 
@@ -97,6 +101,7 @@ struct TicketsProjectConfig: Codable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? d.enabled
         chats = try c.decodeIfPresent([TicketChat].self, forKey: .chats) ?? d.chats
         repos = try c.decodeIfPresent([TicketRepo].self, forKey: .repos) ?? d.repos
+        messageSource = try c.decodeIfPresent(TicketMessageSource.self, forKey: .messageSource) ?? d.messageSource
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? d.model
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? d.baseURL
         pollSeconds = try c.decodeIfPresent(Int.self, forKey: .pollSeconds) ?? d.pollSeconds

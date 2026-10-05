@@ -89,26 +89,28 @@ final class Transcriber: ObservableObject {
     }
 
     /// Appends transcripts to the voice and video messages in place, cached per
-    /// message pk so a file WhatsApp has since purged keeps its text.
-    func attachTranscripts(to messages: inout [ChatMessage], store: WhatsAppStore, language: String?) async {
+    /// message id so a file either client has since purged keeps its text.
+    /// Media is resolved through `ChatMedia`, which both stores feed absolute
+    /// paths into, so the source no longer matters here.
+    func attachTranscripts(to messages: inout [ChatMessage], cache: inout [String: String], language: String?) async {
         // "" means auto-detect; normalize here so no caller can pass an empty
         // language code, which Whisper treats as a real (invalid) language.
         let language = language?.isEmpty == false ? language : nil
         for index in messages.indices {
             let message = messages[index]
             guard message.mediaType == 2 || message.mediaType == 3 else { continue }
-            let key = String(message.pk)
-            if let cached = store.transcriptCache[key] {
+            let key = message.id
+            if let cached = cache[key] {
                 Self.append(cached, to: &messages[index])
                 continue
             }
-            guard let url = store.mediaURL(message.mediaPath) else {
+            guard let url = ChatMedia.url(message.mediaPath) else {
                 // Gone from disk: remember that, or every poll would look again.
-                store.transcriptCache[key] = ""
+                cache[key] = ""
                 continue
             }
             guard let text = await transcribe(fileURL: url, language: language) else { continue }
-            store.transcriptCache[key] = text
+            cache[key] = text
             Self.append(text, to: &messages[index])
         }
     }

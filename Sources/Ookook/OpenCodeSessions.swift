@@ -1,5 +1,5 @@
 import Foundation
-import SQLite3
+import CSQLCipher
 
 /// Reads opencode's session history: the conversations offered for Resume and
 /// the live state shown in the sidebar.

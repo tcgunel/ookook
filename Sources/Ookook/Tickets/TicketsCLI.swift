@@ -61,16 +61,34 @@ enum TicketsCLI {
         return f.date(from: s)
     }
 
+    /// The store a headless command reads from. `--source` overrides the
+    /// project's setting, which is how each client gets checked in isolation.
+    private static func resolveStore(_ o: Options, projectID: String? = nil) async -> any ChatStore {
+        var source: TicketMessageSource = .auto
+        if let raw = o.string("source") {
+            guard let parsed = TicketMessageSource(rawValue: raw) else {
+                print("unknown --source '\(raw)'; use auto, whatsapp or zapfast")
+                return ChatStoreResolver.resolve(source: .auto)
+            }
+            source = parsed
+        } else if let projectID {
+            source = await MainActor.run { TicketsConfigStore().config(for: projectID).messageSource }
+        }
+        return ChatStoreResolver.resolve(source: source) { print($0); fflush(stdout) }
+    }
+
     private static func run(_ command: String, _ o: Options) async throws {
         switch command {
         case "list-chats":
-            let store = WhatsAppStore()
+            let store = await resolveStore(o)
             defer { store.close() }
-            print("JID".padding(toLength: 32, withPad: " ", startingAt: 0) + " type   msgs  name")
-            for c in try store.listChats() {
+            print("JID".padding(toLength: 32, withPad: " ", startingAt: 0) + " type   msgs  source   name")
+            for c in try store.listChats(limit: 200) {
                 print(c.jid.padding(toLength: 32, withPad: " ", startingAt: 0) + " "
                       + (c.isGroup ? "group" : "1:1").padding(toLength: 6, withPad: " ", startingAt: 0)
-                      + String(format: " %5d  ", c.messageCount) + c.name)
+                      + String(format: " %5d  ", c.messageCount)
+                      + (c.sourceLabel ?? store.label).padding(toLength: 8, withPad: " ", startingAt: 0)
+                      + c.name)
             }
 
         case "import-config":
@@ -81,7 +99,7 @@ enum TicketsCLI {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CLIError("bad json") }
             var config = await MainActor.run { TicketsConfigStore().config(for: id) }
             if let jid = json["chat_jid"] as? String, !jid.isEmpty, !config.chats.contains(where: { $0.jid == jid }) {
-                let store = WhatsAppStore()
+                let store = await resolveStore(o, projectID: id)
                 let name = (try? store.listChats(limit: 500))?.first { $0.jid == jid }?.name ?? jid
                 store.close()
                 config.chats.append(TicketChat(jid: jid, name: name))
@@ -113,8 +131,11 @@ enum TicketsCLI {
             guard let id = o.string("project"), let from = o.string("from").flatMap(day), let to = o.string("to").flatMap(day) else {
                 throw CLIError("usage: backtest --project <id> --from YYYY-MM-DD --to YYYY-MM-DD [--out file]")
             }
-            let config = await MainActor.run { TicketsConfigStore().config(for: id) }
+            var config = await MainActor.run { TicketsConfigStore().config(for: id) }
             guard config.isConfigured else { throw CLIError("project \(id) has no chats/repos configured") }
+            if let raw = o.string("source"), let parsed = TicketMessageSource(rawValue: raw) {
+                config.messageSource = parsed
+            }
             guard let key = o.string("key") ?? TicketsKeychain.deepSeekKey(projectID: id) else { throw DeepSeekError.noKey }
             let deepSeek = DeepSeekClient(apiKey: key, model: config.model, baseURL: config.baseURL)
             let transcriber = o.string("transcribe") != nil ? await MainActor.run { Transcriber() } : nil
@@ -161,16 +182,19 @@ enum TicketsCLI {
             await MainActor.run { transcriber.model = previous }
 
         case "redact-test":
-            guard let id = o.string("project") else { throw CLIError("usage: redact-test --project <id> [--hours N]") }
+            guard let id = o.string("project") else { throw CLIError("usage: redact-test --project <id> [--hours N] [--source auto|whatsapp|zapfast]") }
             let hours = Double(o.string("hours") ?? "24") ?? 24
             let config = await MainActor.run { TicketsConfigStore().config(for: id) }
-            let store = WhatsAppStore()
+            let store = await resolveStore(o, projectID: id)
             defer { store.close() }
             let transcriber = o.string("transcribe") != nil ? await MainActor.run { Transcriber() } : nil
+            var ocrCache: [String: String] = [:]
+            var transcriptCache: [String: String] = [:]
             for chat in config.chats {
                 var messages = try store.fetchMessages(chat: chat, since: Date().addingTimeInterval(-hours * 3600))
+                messages = ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots, cache: &ocrCache)
                 if let transcriber {
-                    await transcriber.attachTranscripts(to: &messages, store: store,
+                    await transcriber.attachTranscripts(to: &messages, cache: &transcriptCache,
                                                        language: config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage)
                 }
                 Redactor.redactSequence(&messages)
