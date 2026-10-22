@@ -92,7 +92,8 @@ final class Transcriber: ObservableObject {
     /// message id so a file either client has since purged keeps its text.
     /// Media is resolved through `ChatMedia`, which both stores feed absolute
     /// paths into, so the source no longer matters here.
-    func attachTranscripts(to messages: inout [ChatMessage], cache: inout [String: String], language: String?) async {
+    func attachTranscripts(to messages: inout [ChatMessage], cache: inout [String: String],
+                           language: String?, wait: TimeInterval) async {
         // "" means auto-detect; normalize here so no caller can pass an empty
         // language code, which Whisper treats as a real (invalid) language.
         let language = language?.isEmpty == false ? language : nil
@@ -100,25 +101,31 @@ final class Transcriber: ObservableObject {
             let message = messages[index]
             guard message.mediaType == 2 || message.mediaType == 3 else { continue }
             let key = message.id
-            if let cached = cache[key] {
+            if let cached = ChatMedia.cachedText(key, path: message.mediaPath, cache: cache) {
                 Self.append(cached, to: &messages[index])
                 continue
             }
             guard let url = ChatMedia.url(message.mediaPath) else {
                 // Gone from disk: remember that, or every poll would look again.
-                cache[key] = ""
+                // A recent message is more likely still downloading.
+                if !ChatMedia.isStillDownloading(message, wait: wait) { cache[key] = "" }
                 continue
             }
             guard let text = await transcribe(fileURL: url, language: language) else { continue }
-            cache[key] = text
+            cache[key] = text.isEmpty ? ChatMedia.noText : text
             Self.append(text, to: &messages[index])
         }
     }
 
+    /// Room for the full ten minutes `WhisperEngine` transcribes: owners walk
+    /// through several requests in one long video, and the last ones were
+    /// being cut off before the model saw them.
+    private static let maxTranscriptCharacters = 12_000
+
     private static func append(_ transcript: String, to message: inout ChatMessage) {
         guard !transcript.isEmpty else { return }
         let label = message.mediaType == 3 ? "voice transcript" : "video transcript"
-        message.text += " (\(label): \(String(transcript.prefix(1200))))"
+        message.text += " (\(label): \(String(transcript.prefix(maxTranscriptCharacters))))"
     }
 }
 

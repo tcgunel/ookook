@@ -403,6 +403,25 @@ final class ZapFastStore: ChatStore {
         return rows(stmt, chat: chat).reversed()
     }
 
+    /// Raw stored content per message, for the `media-status` diagnostic.
+    func rawContents(chat: TicketChat, since: Date) throws -> [(id: String, content: String)] {
+        let db = try open()
+        let chatID = try resolvedChatID(chat.jid) ?? chat.jid
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id, content FROM messages WHERE chat = ? AND timestamp >= ? ORDER BY timestamp, rowid",
+                                 -1, &stmt, nil) == SQLITE_OK else {
+            throw ZapFastError.query(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, chatID, -1, Self.transient)
+        sqlite3_bind_int64(stmt, 2, Int64(since.timeIntervalSince1970.rounded(.down)))
+        var out: [(id: String, content: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((Self.text(stmt, 0) ?? "", Self.text(stmt, 1) ?? ""))
+        }
+        return out
+    }
+
     private func rows(_ stmt: OpaquePointer?, chat: TicketChat) -> [ChatMessage] {
         var out: [ChatMessage] = []
         while sqlite3_step(stmt) == SQLITE_ROW {

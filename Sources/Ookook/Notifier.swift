@@ -56,6 +56,11 @@ final class Notifier {
         post(title: title, body: body, sound: "Pop")
     }
 
+    /// The ticket pipeline is holding a batch until its media downloads.
+    func ticketMediaWaiting(title: String, body: String) {
+        post(title: title, body: body, sound: "Tink")
+    }
+
     /// Number of agents waiting, shown on the Dock icon.
     func updateBadge(waiting: Int) {
         NSApp.dockTile.badgeLabel = waiting > 0 ? String(waiting) : nil

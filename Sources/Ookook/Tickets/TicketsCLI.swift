@@ -192,17 +192,40 @@ enum TicketsCLI {
             var transcriptCache: [String: String] = [:]
             for chat in config.chats {
                 var messages = try store.fetchMessages(chat: chat, since: Date().addingTimeInterval(-hours * 3600))
-                messages = ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots, cache: &ocrCache)
+                messages = ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots,
+                                               wait: TimeInterval(config.mediaWaitMinutes * 60), cache: &ocrCache)
                 if let transcriber {
                     await transcriber.attachTranscripts(to: &messages, cache: &transcriptCache,
-                                                       language: config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage)
+                                                       language: config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage,
+                                                       wait: TimeInterval(config.mediaWaitMinutes * 60))
                 }
                 Redactor.redactSequence(&messages)
                 for m in messages { print(m.formatted) }
             }
 
+        case "media-status":
+            guard let id = o.string("project") else { throw CLIError("usage: media-status --project <id> [--hours N]") }
+            let hours = Double(o.string("hours") ?? "24") ?? 24
+            let config = await MainActor.run { TicketsConfigStore().config(for: id) }
+            guard case .success(let store) = ZapFastStore.make() else { throw CLIError("ZapFast archive is not readable") }
+            defer { store.close() }
+            for chat in config.chats {
+                for row in try store.rawContents(chat: chat, since: Date().addingTimeInterval(-hours * 3600)) {
+                    guard let data = row.content.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let kind = obj["kind"] as? String,
+                          ["image", "video", "audio", "document"].contains(kind) else { continue }
+                    let media = obj["media"] as? [String: Any] ?? [:]
+                    let path = media["path"] as? String
+                    let onDisk = path.map { FileManager.default.fileExists(atPath: $0) } ?? false
+                    // Field names only: the values include the media key.
+                    print("\(row.id) \(kind) path=\(path == nil ? "none" : (onDisk ? "on-disk" : "missing")) "
+                          + "top=\(obj.keys.sorted()) media=\(media.keys.sorted())")
+                }
+            }
+
         default:
-            print("commands: list-chats, import-config, set-key, backtest, redact-test, transcribe")
+            print("commands: list-chats, import-config, set-key, backtest, redact-test, transcribe, media-status")
         }
     }
 

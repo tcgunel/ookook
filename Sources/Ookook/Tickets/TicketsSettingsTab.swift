@@ -282,6 +282,10 @@ private struct TicketsProjectEditor: View {
                 TranscriptionStatusRow(transcriber: worker.transcriber)
                 Text("Transcription runs on this Mac — audio never leaves it. The model downloads once from Hugging Face, and each message is transcribed once.")
                     .font(.caption).foregroundStyle(.secondary)
+                Stepper("Wait up to \(draft.mediaWaitMinutes) min for media to download",
+                        value: $draft.mediaWaitMinutes, in: 0 ... 1440, step: 15)
+                Text("ZapFast downloads a chat's media when the chat is opened. A batch with a screenshot, video or voice note that is not on disk yet waits for it, and Ookook notifies you once so you can open the chat.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Toggle("Auto-approve bug/feature tickets", isOn: Binding(
                         get: { draft.autoApproveAbove <= 1 },

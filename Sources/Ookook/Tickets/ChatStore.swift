@@ -136,21 +136,44 @@ enum ChatMedia {
         return String(lines.joined(separator: " | ").prefix(limit))
     }
 
+    /// Cached for a file that was read and held no text, so it is not read
+    /// again. An empty string means the file was not there to read.
+    static let noText = "\u{2205}"
+
+    /// How long a media message may sit undownloaded before it is treated as
+    /// purged. ZapFast fetches media when its chat is opened, not when the
+    /// message arrives, so a fresh message's file is often minutes behind it.
+    static func isStillDownloading(_ message: ChatMessage, wait: TimeInterval) -> Bool {
+        url(message.mediaPath) == nil && Date().timeIntervalSince(message.date) < wait
+    }
+
+    /// The cached text for a media message, `nil` when it still has to be
+    /// worked out: never seen, or written off as missing while the file has
+    /// since arrived (the message was read before its download finished).
+    static func cachedText(_ id: String, path: String?, cache: [String: String]) -> String? {
+        guard let cached = cache[id] else { return nil }
+        if cached.isEmpty, url(path) != nil { return nil }
+        return cached == noText ? "" : cached
+    }
+
     /// Applies OCR to the image messages, caching per message id, so a
     /// screenshot either client later purges keeps its text. Shared by the
     /// pipeline and the headless commands.
-    static func applyOCR(to messages: [ChatMessage], enabled: Bool,
+    static func applyOCR(to messages: [ChatMessage], enabled: Bool, wait: TimeInterval,
                          cache: inout [String: String]) -> [ChatMessage] {
         guard enabled else { return messages }
         return messages.map { message in
             guard message.mediaType == 1 else { return message }
             var message = message
             let text: String
-            if let cached = cache[message.id] {
+            if let cached = cachedText(message.id, path: message.mediaPath, cache: cache) {
                 text = cached
+            } else if let file = url(message.mediaPath) {
+                text = recognizeText(at: file)
+                cache[message.id] = text.isEmpty ? noText : text
             } else {
-                text = url(message.mediaPath).map { recognizeText(at: $0) } ?? ""
-                cache[message.id] = text
+                text = ""
+                if !isStillDownloading(message, wait: wait) { cache[message.id] = "" }
             }
             if !text.isEmpty { message.text += " (screenshot text: \(text))" }
             return message

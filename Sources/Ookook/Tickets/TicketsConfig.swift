@@ -79,6 +79,9 @@ struct TicketsProjectConfig: Codable, Equatable {
     /// Spoken language for transcription; empty means auto-detect, which
     /// handles the mixed Turkish/English chats better than forcing one.
     var transcribeLanguage = ""
+    /// How long a batch waits for its screenshots, videos and voice notes to
+    /// land on disk before it is classified without them.
+    var mediaWaitMinutes = 120
     /// Tasks at or above this confidence skip triage and go straight to `todo`.
     /// 1.0 (or anything above 1) disables it.
     var autoApproveAbove = 1.01
@@ -121,6 +124,7 @@ struct TicketsProjectConfig: Codable, Equatable {
         maxAttachmentMB = try c.decodeIfPresent(Int.self, forKey: .maxAttachmentMB) ?? d.maxAttachmentMB
         transcribeMedia = try c.decodeIfPresent(Bool.self, forKey: .transcribeMedia) ?? d.transcribeMedia
         transcribeLanguage = try c.decodeIfPresent(String.self, forKey: .transcribeLanguage) ?? d.transcribeLanguage
+        mediaWaitMinutes = try c.decodeIfPresent(Int.self, forKey: .mediaWaitMinutes) ?? d.mediaWaitMinutes
         autoApproveAbove = try c.decodeIfPresent(Double.self, forKey: .autoApproveAbove) ?? d.autoApproveAbove
         autoApproveTypes = try c.decodeIfPresent([String].self, forKey: .autoApproveTypes) ?? d.autoApproveTypes
         ignoredTypes = try c.decodeIfPresent([String].self, forKey: .ignoredTypes) ?? d.ignoredTypes

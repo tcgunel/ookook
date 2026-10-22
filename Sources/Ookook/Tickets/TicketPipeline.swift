@@ -383,6 +383,14 @@ final class TicketPipeline {
     /// Set by the worker when the user turns the pipeline off mid-run.
     var isCancelled: () -> Bool = { false }
 
+    /// Chats whose next batch is held for media that has not downloaded yet,
+    /// with how many files each is waiting on. Filled by `runOnce`.
+    private(set) var waitingForMedia: [(chat: String, files: Int)] = []
+    /// Whether this poll found a media message nobody was told about yet.
+    private(set) var hasNewMediaWait = false
+    /// Message ids already announced, so one download nags once per run of the app.
+    private static var announcedWaits: Set<String> = []
+
     init(projectID: String, config: TicketsProjectConfig, store: any ChatStore, deepSeek: DeepSeekClient,
          board: TicketBoard, state: TicketsState, transcriber: Transcriber? = nil, log: @escaping (String) -> Void) {
         self.projectID = projectID
@@ -406,8 +414,8 @@ final class TicketPipeline {
     private func transcribeMedia(in batch: inout [ChatMessage], context: inout [ChatMessage]) async {
         guard config.transcribeMedia, let transcriber else { return }
         let language = config.transcribeLanguage.isEmpty ? nil : config.transcribeLanguage
-        await transcriber.attachTranscripts(to: &batch, cache: &state.transcripts, language: language)
-        await transcriber.attachTranscripts(to: &context, cache: &state.transcripts, language: language)
+        await transcriber.attachTranscripts(to: &batch, cache: &state.transcripts, language: language, wait: mediaWait)
+        await transcriber.attachTranscripts(to: &context, cache: &state.transcripts, language: language, wait: mediaWait)
         persist()
     }
 
@@ -415,7 +423,32 @@ final class TicketPipeline {
     /// a screenshot either client later purges keeps its text. Vision runs
     /// here rather than in the stores because the cache outlives them.
     private func withOCR(_ messages: [ChatMessage]) -> [ChatMessage] {
-        ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots, cache: &state.ocr)
+        ChatMedia.applyOCR(to: messages, enabled: config.ocrScreenshots, wait: mediaWait, cache: &state.ocr)
+    }
+
+    private var mediaWait: TimeInterval { TimeInterval(config.mediaWaitMinutes * 60) }
+
+    /// A message whose file something will read - OCR, Whisper or the
+    /// attachment upload - and which has not reached the disk yet.
+    private func awaitsDownload(_ message: ChatMessage) -> Bool {
+        let wanted: Bool
+        switch message.mediaType {
+        case 1: wanted = config.ocrScreenshots || config.attachMedia
+        case 2: wanted = config.transcribeMedia || config.attachMedia
+        case 3: wanted = config.transcribeMedia
+        case 8: wanted = config.attachMedia
+        default: wanted = false
+        }
+        return wanted && ChatMedia.isStillDownloading(message, wait: mediaWait)
+    }
+
+    /// Media the wait gave up on still tells the model something was sent,
+    /// rather than passing as a bare "[video]" it can only ignore.
+    private static func markUndownloaded(_ messages: inout [ChatMessage]) {
+        for index in messages.indices where [1, 2, 3, 8].contains(messages[index].mediaType)
+            && ChatMedia.url(messages[index].mediaPath) == nil {
+            messages[index].text += " (file never downloaded; its content is unknown - ask for it if it matters)"
+        }
     }
 
     // MARK: Repo map
@@ -745,6 +778,8 @@ final class TicketPipeline {
     @discardableResult
     func runOnce(waitForQuiet: Bool = true) async throws -> Int {
         adoptSourceIfChanged()
+        waitingForMedia = []
+        hasNewMediaWait = false
         var handled = 0
         var touched = false
         for chat in config.chats {
@@ -766,9 +801,22 @@ final class TicketPipeline {
             await board.ensureLabels()
             for batch in Self.batches(messages, gap: Double(config.batchGapSeconds)) {
                 if isCancelled() { break }
+                // Later batches wait too: the cursor only moves forward.
+                let pending = batch.filter(awaitsDownload)
+                if !pending.isEmpty {
+                    waitingForMedia.append((chat.name, pending.count))
+                    let fresh = pending.map(\.id).filter { !Self.announcedWaits.contains($0) }
+                    if !fresh.isEmpty {
+                        Self.announcedWaits.formUnion(fresh)
+                        hasNewMediaWait = true
+                        log("\(chat.name): holding batch for \(pending.count) media file(s) not downloaded yet; open the chat in ZapFast")
+                    }
+                    break
+                }
                 var batch = batch
                 var context = withOCR((try? store.fetchContext(chat: chat, before: batch[0].date, count: config.contextMessages)) ?? [])
                 await transcribeMedia(in: &batch, context: &context)
+                Self.markUndownloaded(&batch)
                 await process(batch: batch, context: context, repoMap: map)
                 handled += 1
                 if !board.isDryRun {

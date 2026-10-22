@@ -8,6 +8,9 @@ struct TicketsProjectStatus: Equatable {
     var lastPoll: Date?
     var lastBatch: Date?
     var lastError: String?
+    /// Chats whose next batch is held until its media downloads, e.g.
+    /// "Petshop Ekspres (3 files)". Empty when nothing is waiting.
+    var waitingForMedia: [String] = []
     /// Why the board's columns are empty, when the last board fetch failed.
     /// Kept apart from `lastError` so a quiet chat and a broken connection do
     /// not read as the same thing.
@@ -191,6 +194,10 @@ final class TicketsWorker: ObservableObject {
             let pipeline = try makePipeline(id)
             pipelines[id] = pipeline
             let handled = try await pipeline.runOnce(waitForQuiet: waitForQuiet)
+            status[id]?.waitingForMedia = pipeline.waitingForMedia.map { "\($0.chat) (\($0.files) file\($0.files == 1 ? "" : "s"))" }
+            if pipeline.hasNewMediaWait {
+                notifyMediaWait(pipeline.waitingForMedia, projectID: id)
+            }
             status[id]?.lastPoll = Date()
             status[id]?.lastError = nil
             status[id]?.usage = pipeline.deepSeek.usage
@@ -215,6 +222,16 @@ final class TicketsWorker: ObservableObject {
             ? "\(projectName(projectID)) · \(first.shop ?? "shop unknown") · \(first.type ?? "?")"
             : created.map(\.title).joined(separator: "\n")
         Notifier.shared.ticketCreated(title: title, body: body)
+    }
+
+    /// Opening the chat in ZapFast is what downloads its media, so say which.
+    private func notifyMediaWait(_ waiting: [(chat: String, files: Int)], projectID: String) {
+        guard configs.config(for: projectID).notifyOnNewTicket, !waiting.isEmpty else { return }
+        let chats = waiting.map(\.chat).joined(separator: ", ")
+        let files = waiting.reduce(0) { $0 + $1.files }
+        Notifier.shared.ticketMediaWaiting(
+            title: "Waiting for \(files) media file(s) to download",
+            body: "\(projectName(projectID)) · open \(chats) in ZapFast so the tickets can read them")
     }
 
     // MARK: Board view
