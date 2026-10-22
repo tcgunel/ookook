@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 
 /// Headless entry points for the ticket pipeline, so it can be checked from a
 /// terminal without clicking through the app:
@@ -224,8 +226,47 @@ enum TicketsCLI {
                 }
             }
 
+        case "render-settings":
+            // Renders Settings › Tickets offscreen, one PNG per pane, so the
+            // layout can be looked at without a second app instance polling
+            // the same chats.
+            guard let id = o.string("project"), let out = o.string("out") else {
+                throw CLIError("usage: render-settings --project <id> --out <dir> [--pane status|…|all] [--query text [--in pane]] [--width 720] [--height 560]")
+            }
+            let width = Double(o.string("width") ?? "720") ?? 720
+            let height = Double(o.string("height") ?? "560") ?? 560
+            let wanted = o.string("pane") ?? "all"
+            let query = o.string("query") ?? ""
+            let searchAll = o.string("in") != "pane"
+            let panes = wanted == "all" ? TicketsSettingsPane.allCases : [TicketsSettingsPane(rawValue: wanted)].compactMap { $0 }
+            guard !panes.isEmpty else { throw CLIError("unknown pane \(wanted)") }
+            try FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+            for pane in panes {
+                try await MainActor.run {
+                    _ = NSApplication.shared
+                    let worker = TicketsWorker(configs: TicketsConfigStore())
+                    let view = TicketsSettingsTab(worker: worker, projects: [(id, URL(fileURLWithPath: id).lastPathComponent)],
+                                                  initialProject: id, initialPane: pane,
+                                                  initialQuery: query, searchAll: searchAll)
+                        .frame(width: width, height: height)
+                    let host = NSHostingView(rootView: view)
+                    host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+                    let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.contentView = host
+                    window.layoutIfNeeded()
+                    RunLoop.main.run(until: Date().addingTimeInterval(2))
+                    host.layoutSubtreeIfNeeded()
+                    guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { throw CLIError("could not render") }
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    guard let png = rep.representation(using: .png, properties: [:]) else { throw CLIError("could not encode png") }
+                    let file = URL(fileURLWithPath: out).appendingPathComponent("\(pane.rawValue).png")
+                    try png.write(to: file)
+                    print("wrote \(file.path)")
+                }
+            }
+
         default:
-            print("commands: list-chats, import-config, set-key, backtest, redact-test, transcribe, media-status")
+            print("commands: list-chats, import-config, set-key, backtest, redact-test, transcribe, media-status, render-settings")
         }
     }
 
